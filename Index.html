@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIPSID-KGB - Dinas Pendidikan dan Kebudayaan Provinsi NTT</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* Pengaturan Dasar Kertas Cetak */
+        .kertas-cetak {
+            padding: 10mm 20mm 20mm 20mm; /* Atas 10mm, sisi lain 20mm */
+            background: white;
+            box-sizing: border-box;
+            font-family: 'Arial', sans-serif;
+            font-size: 10pt;
+            font-weight: normal;
+            line-height: 1.15;
+            margin: 0 auto;
+        }
+        
+        /* Ukuran Kertas Spesifik */
+        .kertas-legal { width: 215.9mm; min-height: 355.6mm; }
+        .kertas-a4 { width: 210mm; min-height: 297mm; }
+
+        .kertas-cetak * {
+            font-weight: normal !important;
+        }
+
+        /* Aturan khusus saat print / cetak */
+        @media print {
+            body * { visibility: hidden; }
+            #print-modal-container, #print-modal-container * { visibility: visible; }
+            #print-modal-container { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: white; }
+            
+            #report-print-container, #report-print-container * { visibility: visible; }
+            #report-print-container { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: white; z-index: 99999; }
+            
+            .no-print { display: none !important; }
+            .kertas-cetak { box-shadow: none !important; margin: 0 !important; width: 100% !important; min-height: auto !important; padding: 0 !important; }
+            
+            body.print-a4 @page { size: A4 portrait; margin: 10mm 15mm 15mm 15mm; }
+            body.print-legal @page { size: legal portrait; margin: 10mm 15mm 15mm 15mm; }
+        }
+
+        /* Animasi Custom untuk Notifikasi Toast */
+        @keyframes slideInRight {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+        .toast-enter { animation: slideInRight 0.5s ease-out forwards; }
+        .toast-exit { animation: fadeOut 0.5s ease-in forwards; }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+    <!-- LOGIN PAGE -->
+    <div id="login-page" class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-900 relative p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md z-10 border border-blue-100">
+            <div class="text-center mb-8">
+                <div class="w-24 h-24 mx-auto mb-4 flex items-center justify-center drop-shadow-md bg-white rounded-full p-2">
+                    <img src="https://lh3.googleusercontent.com/d/1pRlJIuLpn3YnR8Dp-fIIDXt9-IX2sXd3" alt="Logo SIPSID-KGB" class="w-full h-full object-contain" onerror="this.onerror=null; this.src='https://placehold.co/100x100/1e3a8a/ffffff?text=NTT';">
+                </div>
+                <h2 class="text-2xl font-bold text-gray-800 tracking-tight">SIPSID-KGB</h2>
+                <p class="text-xs text-gray-500 mt-1">Sistem Pembuatan Surat Pemberitahuan Digital KGB<br>Dinas Pendidikan dan Kebudayaan Provinsi NTT</p>
+            </div>
+            
+            <form id="login-form-element" onsubmit="login(event)">
+                <div class="mb-4">
+                    <label class="block text-gray-700 text-xs font-bold uppercase tracking-wider mb-2"><i class="fas fa-user text-blue-600 mr-1"></i> Username</label>
+                    <input type="text" id="username" class="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm transition" required placeholder="Masukkan username...">
+                </div>
+                <div class="mb-6">
+                    <label class="block text-gray-700 text-xs font-bold uppercase tracking-wider mb-2"><i class="fas fa-lock text-blue-600 mr-1"></i> Password</label>
+                    <input type="password" id="password" class="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm transition" required placeholder="Masukkan password...">
+                </div>
+                
+                <div id="login-error-msg" class="hidden text-red-600 text-sm mb-4 text-center font-medium bg-red-50 p-3 rounded-xl border border-red-200">
+                    <i class="fas fa-exclamation-circle mr-1"></i> Username atau Password tidak ditemukan!
+                </div>
+                
+                <button type="submit" class="w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-3 px-4 rounded-xl transition duration-200 shadow-lg shadow-blue-500/30 flex items-center justify-center space-x-2">
+                    <i class="fas fa-sign-in-alt"></i>
+                    <span>Masuk ke Sistem</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MAIN APP -->
+    <div id="main-app" class="hidden min-h-screen flex flex-col relative overflow-hidden">
+        
+        <!-- UI Toast Notification -->
+        <div id="toast-notification" class="fixed top-20 right-4 z-50 hidden max-w-sm w-full bg-white border border-gray-200 rounded-xl shadow-lg flex items-start p-4 space-x-3">
+            <div id="toast-icon" class="flex-shrink-0 text-xl mt-0.5"></div>
+            <div class="flex-1">
+                <h4 id="toast-title" class="text-sm font-bold text-gray-900">Judul</h4>
+                <p id="toast-msg" class="text-xs text-gray-500 mt-1">Pesan notifikasi...</p>
+            </div>
+            <button onclick="closeToast()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+        </div>
+
+        <!-- Top Navbar -->
+        <header class="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-xs">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <div class="w-9 h-9 flex items-center justify-center">
+                        <img src="https://lh3.googleusercontent.com/d/1pRlJIuLpn3YnR8Dp-fIIDXt9-IX2sXd3" alt="Logo" class="w-full h-full object-contain" onerror="this.onerror=null; this.src='https://placehold.co/100x100/1e3a8a/ffffff?text=NTT';">
+                    </div>
+                    <div>
+                        <h1 class="text-base font-bold text-gray-900 leading-tight">SIPSID-KGB</h1>
+                        <p class="text-[10px] sm:text-xs text-gray-500 truncate max-w-[150px] sm:max-w-none">Dinas Pendidikan & Kebudayaan NTT</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span id="active-user-name" class="text-xs font-semibold px-3 py-1.5 bg-blue-50 text-blue-700 rounded-full border border-blue-200 shadow-sm flex items-center max-w-[150px] sm:max-w-none truncate">
+                        <i class="fas fa-user-circle mr-1.5 text-sm"></i> <span class="truncate">Admin</span>
+                    </span>
+                    <button onclick="logout()" class="text-gray-500 hover:text-red-600 text-sm font-medium transition flex items-center space-x-1.5 bg-gray-50 hover:bg-red-50 px-3 py-1.5 rounded-full border border-gray-200 hover:border-red-200">
+                        <i class="fas fa-power-off"></i>
+                        <span class="hidden sm:inline">Keluar</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs Bar -->
+        <div class="bg-white border-b border-gray-200 shadow-xs">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-1 sm:space-x-8 overflow-x-auto no-scrollbar">
+                <button onclick="navigate('dashboard')" id="nav-dashboard" class="nav-btn py-4 px-3 border-b-2 font-medium text-sm flex items-center space-x-2 whitespace-nowrap transition border-blue-600 text-blue-600">
+                    <i class="fas fa-chart-pie"></i><span>Dashboard</span>
+                </button>
+                <button onclick="navigate('create')" id="nav-create" class="nav-btn py-4 px-3 border-b-2 font-medium text-sm flex items-center space-x-2 whitespace-nowrap transition border-transparent text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-file-pen"></i><span>Pembuatan Surat KGB</span>
+                </button>
+                <button onclick="navigate('list')" id="nav-list" class="nav-btn py-4 px-3 border-b-2 font-medium text-sm flex items-center space-x-2 whitespace-nowrap transition border-transparent text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-folder-open"></i><span>Arsip Surat</span>
+                </button>
+                <button onclick="navigate('report')" id="nav-report" class="nav-btn py-4 px-3 border-b-2 font-medium text-sm flex items-center space-x-2 whitespace-nowrap transition border-transparent text-gray-500 hover:text-gray-700">
+                    <i class="fas fa-chart-bar"></i><span>Laporan Rekapitulasi</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Content Area -->
+        <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 relative">
+            
+            <!-- VIEW: DASHBOARD -->
+            <section id="view-dashboard" class="app-view space-y-6">
+                <div class="bg-gradient-to-r from-blue-700 via-blue-800 to-indigo-900 rounded-2xl p-6 sm:p-8 text-white shadow-xl flex flex-col md:flex-row items-center justify-between border border-blue-600">
+                    <div class="space-y-2 mb-6 md:mb-0 text-center md:text-left">
+                        <h2 class="text-2xl sm:text-3xl font-bold tracking-tight" id="welcome-message">Selamat Datang di SIPSID-KGB</h2>
+                        <p class="text-blue-100 text-sm max-w-xl leading-relaxed">Sistem Pembuatan Surat Pemberitahuan Digital Kenaikan Gaji Berkala PNS dan PPPK Lingkup Dinas Pendidikan dan Kebudayaan Provinsi NTT secara terintegrasi dan akurat.</p>
+                    </div>
+                    <button onclick="navigate('create')" class="bg-white text-blue-800 hover:bg-blue-50 font-bold px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(255,255,255,0.3)] transition flex items-center space-x-2 whitespace-nowrap transform hover:scale-105">
+                        <i class="fas fa-plus-circle text-lg"></i><span>Buat Surat Baru</span>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex items-center space-x-4 transition hover:shadow-md">
+                        <div class="p-4 bg-blue-50 text-blue-600 rounded-2xl text-xl"><i class="fas fa-file-lines"></i></div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Total Surat Terbit</p>
+                            <h3 id="stat-total" class="text-2xl font-black text-gray-800 mt-1">0</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex items-center space-x-4 transition hover:shadow-md">
+                        <div class="p-4 bg-emerald-50 text-emerald-600 rounded-2xl text-xl"><i class="fas fa-user-tie"></i></div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Status PNS</p>
+                            <h3 id="stat-pns" class="text-2xl font-black text-gray-800 mt-1">0</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex items-center space-x-4 transition hover:shadow-md">
+                        <div class="p-4 bg-amber-50 text-amber-600 rounded-2xl text-xl"><i class="fas fa-id-card"></i></div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Status PPPK</p>
+                            <h3 id="stat-pppk" class="text-2xl font-black text-gray-800 mt-1">0</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex items-center space-x-4 transition hover:shadow-md">
+                        <div class="p-4 bg-indigo-50 text-indigo-600 rounded-2xl text-xl"><i class="fas fa-map-marked-alt"></i></div>
+                        <div>
+                            <p class="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Cakupan Wilayah</p>
+                            <h3 class="text-2xl font-black text-gray-800 mt-1">22 <span class="text-sm font-medium text-gray-500">Kab/Kota</span></h3>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VIEW: PEMBUATAN SURAT -->
+            <section id="view-create" class="app-view hidden space-y-6">
+                <div class="bg-white rounded-2xl p-6 sm:p-8 shadow-sm border border-gray-200">
+                    <div class="border-b border-gray-200 pb-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-800">Formulir Pembuatan Surat Kenaikan Gaji Berkala (KGB)</h2>
+                            <p class="text-xs text-gray-500 mt-1">Lengkapi data pegawai dan rincian gaji sesuai peraturan perundang-undangan yang berlaku.</p>
+                        </div>
+                        <button onclick="resetForm()" class="text-xs text-red-600 bg-red-50 px-4 py-2 rounded-lg hover:bg-red-100 font-bold transition flex items-center w-fit">
+                            <i class="fas fa-rotate-right mr-1.5"></i> Kosongkan Form
+                        </button>
+                    </div>
+
+                    <form id="kgb-form" onsubmit="submitKgbForm(event)" class="space-y-8">
+                        
+                        <!-- Bagian A: Data Pegawai -->
+                        <div class="bg-slate-50 p-5 rounded-xl border border-slate-200">
+                            <h3 class="text-sm font-bold text-blue-800 uppercase tracking-wider mb-4 pb-2 border-b border-slate-300 flex items-center space-x-2">
+                                <i class="fas fa-user-circle text-lg"></i><span>A. Data Pokok Pegawai</span>
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Status Kepegawaian *</label>
+                                    <select id="pegawai-status" onchange="onStatusPegawaiChange()" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                        <option value="PNS">PNS (Pegawai Negeri Sipil)</option>
+                                        <option value="PPPK">PPPK (Pegawai Pemerintah dg Perjanjian Kerja)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Nama Lengkap & Gelar *</label>
+                                    <input type="text" id="pegawai-nama" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required placeholder="Contoh: LONGGINUS OLA, S.Pd">
+                                </div>
+                                <div>
+                                    <label id="label-nip" class="block text-[11px] font-bold text-gray-700 uppercase mb-1">NIP / NI PPPK *</label>
+                                    <input type="text" id="pegawai-nip" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition font-mono" required placeholder="18 digit Angka">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Pangkat / Golongan Ruang *</label>
+                                    <select id="pegawai-pangkat" onchange="calculateSalary()" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                        <!-- Dinamis via JS -->
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Jabatan *</label>
+                                    <input type="text" id="pegawai-jabatan" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required placeholder="Contoh: Guru Muda">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Unit Kerja / Sekolah *</label>
+                                    <input type="text" id="pegawai-unit" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required placeholder="Contoh: SMK NEGERI 1 LOBALAIN">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Kabupaten / Kota *</label>
+                                    <select id="pegawai-kabkot" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                        <!-- 22 Kab/Kota NTT via JS -->
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Bagian B: Atas Dasar SK Pangkat/Berkala Terakhir -->
+                        <div class="bg-slate-50 p-5 rounded-xl border border-slate-200">
+                            <h3 class="text-sm font-bold text-blue-800 uppercase tracking-wider mb-4 pb-2 border-b border-slate-300 flex items-center space-x-2">
+                                <i class="fas fa-file-invoice text-lg"></i><span>B. Atas Dasar SK Pangkat / Berkala Terakhir</span>
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+                                <div class="lg:col-span-2">
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Pejabat Penetap SK Sebelumnya *</label>
+                                    <select id="sk-pejabat" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                        <option value="Gubernur Nusa Tenggara Timur">Gubernur Nusa Tenggara Timur</option>
+                                        <option value="Pj. Gubernur Nusa Tenggara Timur">Pj. Gubernur Nusa Tenggara Timur</option>
+                                        <option value="Wakil Gubernur Nusa Tenggara Timur">Wakil Gubernur Nusa Tenggara Timur</option>
+                                        <option value="Kepala Badan Kepegawaian Negara">Kepala Badan Kepegawaian Negara</option>
+                                        <option value="Plt. Kepala Badan Kepegawaian Negara">Plt. Kepala Badan Kepegawaian Negara</option>
+                                        <option value="Kepala Badan Kepegawaian Daerah Provinsi NTT">Kepala Badan Kepegawaian Daerah Provinsi NTT</option>
+                                        <option value="Plt. Kepala Badan Kepegawaian Daerah Provinsi NTT">Plt. Kepala Badan Kepegawaian Daerah Provinsi NTT</option>
+                                        <option value="Kepala Dinas Pendidikan dan Kebudayaan Provinsi NTT" selected>Kepala Dinas Pendidikan dan Kebudayaan Provinsi NTT</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Tanggal SK *</label>
+                                    <input type="date" id="sk-tanggal" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Nomor SK *</label>
+                                    <input type="text" id="sk-nomor" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required placeholder="Cth: 822/3077/PK1.3/2024">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">TMT Gaji Lama *</label>
+                                    <input type="date" id="sk-tmt" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Masa Kerja Lama (Tahun) *</label>
+                                    <input type="number" id="mk-lama-thn" min="0" max="40" value="16" oninput="calculateSalary()" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Masa Kerja Lama (Bulan) *</label>
+                                    <input type="number" id="mk-lama-bln" min="0" max="11" value="0" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Gaji Pokok Lama (Bisa Diedit) *</label>
+                                    <input type="text" id="gaji-lama" class="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-semibold text-gray-800 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-sm transition" required>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Bagian C: Penetapan Gaji Baru -->
+                        <div class="bg-blue-50 p-5 rounded-xl border border-blue-200 shadow-sm">
+                            <h3 class="text-sm font-bold text-blue-900 uppercase tracking-wider mb-4 pb-2 border-b border-blue-300 flex items-center space-x-2">
+                                <i class="fas fa-hand-holding-dollar text-lg text-emerald-600"></i><span>C. Penetapan Kenaikan Gaji Berkala (Baru)</span>
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Masa Kerja Baru (Tahun) *</label>
+                                    <input type="number" id="mk-baru-thn" min="1" max="40" value="18" oninput="calculateSalary()" class="w-full px-3 py-2.5 border border-blue-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Masa Kerja Baru (Bulan) *</label>
+                                    <input type="number" id="mk-baru-bln" min="0" max="11" value="0" class="w-full px-3 py-2.5 border border-blue-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">TMT Gaji Baru *</label>
+                                    <input type="date" id="gaji-tmt-baru" class="w-full px-3 py-2.5 border border-blue-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white" required>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Gaji Pokok Baru (Bisa Diedit) *</label>
+                                    <input type="text" id="gaji-baru" class="w-full px-3 py-2.5 bg-white border border-emerald-400 rounded-xl text-sm font-black text-emerald-700 focus:ring-2 focus:ring-emerald-500 focus:outline-none shadow-md transition" required>
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Nomor Surat KGB *</label>
+                                    <input type="text" id="surat-nomor" class="w-full px-3 py-2.5 border border-blue-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white font-mono" required value="800.1.11.13/4006/PK1.2">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Tanggal Pembuatan Surat *</label>
+                                    <input type="date" id="surat-tanggal" class="w-full px-3 py-2.5 border border-blue-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white" required>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Bagian D: Pejabat Penandatangan & Pengaturan Cetak -->
+                        <div class="bg-white p-5 rounded-xl border border-gray-200">
+                            <h3 class="text-sm font-bold text-gray-700 uppercase tracking-wider mb-4 pb-2 border-b border-gray-100 flex items-center space-x-2">
+                                <i class="fas fa-signature text-lg"></i><span>D. Penandatangan & Cetak</span>
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 items-end">
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Jabatan Penandatangan</label>
+                                    <input type="text" id="sign-jabatan" value="Kepala Dinas Pendidikan dan Kebudayaan" readonly class="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-600 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Nama Pejabat</label>
+                                    <input type="text" id="sign-nama" value="Ambrosius Kodo, S.Sos., M.M." readonly class="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-600 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-500 uppercase mb-1">Pangkat / Golongan</label>
+                                    <input type="text" id="sign-pangkat" value="Pembina Utama Muda (IV/c)" readonly class="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-600 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-bold text-gray-800 uppercase mb-1">Ukuran Kertas *</label>
+                                    <select id="ukuran-kertas" class="w-full px-3 py-2.5 border-2 border-blue-400 rounded-xl text-sm bg-blue-50 focus:ring-2 focus:ring-blue-500 focus:outline-none font-bold text-blue-900 transition cursor-pointer" required>
+                                        <option value="legal">Legal (8.5 x 14 inchi)</option>
+                                        <option value="a4">A4 (210 x 297 mm)</option>
+                                    </select>
+                                </div>
+                                <input type="hidden" id="sign-nip" value="197102201995031002">
+                            </div>
+                        </div>
+
+                        <!-- Action Submit Button -->
+                        <div class="pt-4 border-t border-gray-200 flex items-center justify-end">
+                            <button type="submit" id="btn-submit-form" class="bg-blue-700 hover:bg-blue-800 text-white font-bold px-8 py-3.5 rounded-xl shadow-lg shadow-blue-500/30 transition flex items-center justify-center space-x-2 w-full sm:w-auto transform hover:scale-105">
+                                <i class="fas fa-eye text-lg"></i>
+                                <span>Simpan & Pratinjau Surat KGB</span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- VIEW: DAFTAR SURAT (RIWAYAT) -->
+            <section id="view-list" class="app-view hidden space-y-6">
+                <div class="bg-white rounded-2xl p-6 sm:p-8 shadow-sm border border-gray-200">
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-gray-200 gap-4">
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-800">Arsip Pembuatan Surat KGB</h2>
+                            <p class="text-xs text-gray-500 mt-1">Riwayat seluruh surat Kenaikan Gaji Berkala yang telah dibuat di perangkat ini.</p>
+                        </div>
+                        <div class="w-full sm:w-80 relative">
+                            <i class="fas fa-search absolute left-3 top-3 text-gray-400"></i>
+                            <input type="text" id="search-history" oninput="renderHistoryTable()" placeholder="Cari Nama atau NIP..." class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition">
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto mt-6 bg-white rounded-xl border border-gray-100">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-gray-200 text-xs font-bold text-gray-500 uppercase tracking-wider">
+                                    <th class="py-3.5 px-4 rounded-tl-xl">No</th>
+                                    <th class="py-3.5 px-4">Data Pegawai</th>
+                                    <th class="py-3.5 px-4">Status & Pangkat</th>
+                                    <th class="py-3.5 px-4">Kabupaten / Kota</th>
+                                    <th class="py-3.5 px-4">Gaji Baru</th>
+                                    <th class="py-3.5 px-4">Tgl Buat</th>
+                                    <th class="py-3.5 px-4 text-center rounded-tr-xl">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body" class="divide-y divide-gray-100 text-sm text-gray-700">
+                                <!-- Dinamis via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VIEW: LAPORAN -->
+            <section id="view-report" class="app-view hidden space-y-6">
+                <div class="bg-white rounded-2xl p-6 sm:p-8 shadow-sm border border-gray-200 space-y-6">
+                    <div class="flex flex-col lg:flex-row lg:items-center justify-between pb-4 border-b border-gray-200 gap-4">
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-800">Laporan Rekapitulasi KGB</h2>
+                            <p class="text-xs text-gray-500 mt-1">Tabel rekapitulasi untuk dicetak atau diunduh ke format Excel (CSV).</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                            <select id="report-kabkot-filter" onchange="renderReport()" class="px-3 py-2 border border-gray-300 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition flex-1 sm:flex-none">
+                                <option value="">Semua Wilayah NTT</option>
+                            </select>
+                            <input type="month" id="report-month-filter" onchange="renderReport()" class="px-3 py-2 border border-gray-300 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition flex-1 sm:flex-none">
+                            
+                            <button onclick="printReportAction()" class="bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5 shadow-md flex-1 sm:flex-none">
+                                <i class="fas fa-print"></i><span>Cetak</span>
+                            </button>
+                            <button onclick="exportToCSV()" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-1.5 shadow-md flex-1 sm:flex-none">
+                                <i class="fas fa-file-csv"></i><span>CSV</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
+                        <div class="bg-blue-50 p-5 rounded-2xl border border-blue-100 flex items-center justify-between">
+                            <div>
+                                <p class="text-xs font-bold text-blue-700 uppercase">Total Data</p>
+                                <h3 id="report-total-count" class="text-3xl font-extrabold text-blue-900 mt-1">0</h3>
+                            </div>
+                            <i class="fas fa-folder-open text-3xl text-blue-200"></i>
+                        </div>
+                        <div class="bg-emerald-50 p-5 rounded-2xl border border-emerald-100 flex items-center justify-between">
+                            <div>
+                                <p class="text-xs font-bold text-emerald-700 uppercase">PNS</p>
+                                <h3 id="report-pns-count" class="text-3xl font-extrabold text-emerald-900 mt-1">0</h3>
+                            </div>
+                            <i class="fas fa-user-tie text-3xl text-emerald-200"></i>
+                        </div>
+                        <div class="bg-amber-50 p-5 rounded-2xl border border-amber-100 flex items-center justify-between">
+                            <div>
+                                <p class="text-xs font-bold text-amber-700 uppercase">PPPK</p>
+                                <h3 id="report-pppk-count" class="text-3xl font-extrabold text-amber-900 mt-1">0</h3>
+                            </div>
+                            <i class="fas fa-id-card text-3xl text-amber-200"></i>
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto bg-white rounded-xl border border-gray-100">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-gray-200 text-[11px] font-bold text-gray-500 uppercase tracking-wider">
+                                    <th class="py-3 px-4">No</th>
+                                    <th class="py-3 px-4">Kab / Kota</th>
+                                    <th class="py-3 px-4">Nama Pegawai & NIP</th>
+                                    <th class="py-3 px-4">Status & Pangkat</th>
+                                    <th class="py-3 px-4">Tgl Buat</th>
+                                    <th class="py-3 px-4">TMT Baru</th>
+                                    <th class="py-3 px-4 text-right">Gaji Baru</th>
+                                </tr>
+                            </thead>
+                            <tbody id="report-table-body" class="divide-y divide-gray-100 text-sm text-gray-700">
+                                <!-- Dinamis via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- MODAL: PRATINJAU LAYAR KERTAS (SURAT KGB) -->
+    <div id="print-modal-container" class="hidden fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6 overflow-y-auto">
+        <div class="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-full">
+            
+            <div class="no-print bg-slate-800 text-white px-6 py-4 flex items-center justify-between shadow-md z-10">
+                <div class="flex items-center space-x-3">
+                    <div class="bg-blue-600 p-2 rounded-lg text-white"><i class="fas fa-print"></i></div>
+                    <h3 id="print-modal-title" class="font-bold text-sm sm:text-base">Pratinjau Surat KGB</h3>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <button onclick="triggerPrintAction()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center space-x-2 shadow-lg">
+                        <i class="fas fa-print"></i><span class="hidden sm:inline">Cetak / Simpan PDF</span><span class="sm:hidden">Cetak</span>
+                    </button>
+                    <button onclick="closePrintModal()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 hover:text-white p-2.5 rounded-xl transition">
+                        <i class="fas fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Modal Scrollable Content (Paper Simulation) -->
+            <div class="p-2 sm:p-8 overflow-y-auto bg-slate-200 flex-1 flex justify-center custom-scrollbar">
+                <div id="printable-letter-sheet" class="kertas-cetak kertas-legal text-black shadow-xl relative box-border transition-all duration-300">
+                    <!-- Surat resmi akan di-render dinamis di sini -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL: PRATINJAU / CETAK LAPORAN REKAPITULASI -->
+    <div id="report-print-container" class="hidden fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6 overflow-y-auto">
+        <div class="bg-white w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-full">
+            
+            <div class="no-print bg-slate-800 text-white px-6 py-4 flex items-center justify-between shadow-md z-10">
+                <div class="flex items-center space-x-3">
+                    <div class="bg-blue-600 p-2 rounded-lg text-white"><i class="fas fa-print"></i></div>
+                    <h3 class="font-bold text-sm sm:text-base">Cetak Laporan Rekapitulasi KGB</h3>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <button onclick="window.print()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center space-x-2 shadow-lg">
+                        <i class="fas fa-print"></i><span class="hidden sm:inline">Cetak Dokumen</span><span class="sm:hidden">Cetak</span>
+                    </button>
+                    <button onclick="closeReportPrintModal()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 hover:text-white p-2.5 rounded-xl transition">
+                        <i class="fas fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-2 sm:p-8 overflow-y-auto bg-slate-200 flex-1 flex justify-center custom-scrollbar">
+                <div id="printable-report-sheet" class="kertas-cetak kertas-legal text-black shadow-xl relative box-border">
+                    <!-- Konten Laporan Resmi Tercetak -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // =========================================================================
+        // PENGATURAN URL GOOGLE APPS SCRIPT
+        // Sudah diperbarui ke link Aplikasi Web Web App Anda
+        // =========================================================================
+        const scriptURL = 'https://script.google.com/macros/s/AKfycbwijUtSn0WBRxU4Fnh7CKoKrLNZzoCpKgjPAfQ1RgIrVPy97ByKSojAGuYlvGoD4CkIxw/exec';
+        
+        // =========================================================================
+        // DATABASE PENGELOLA
+        // =========================================================================
+        const usersDatabase = [
+            { username: "pengelola1", password: "123456789", namaLengkap: "Pengelola Berkala Satu" },
+            { username: "pengelola2", password: "123456789", namaLengkap: "Pengelola Berkala Dua" },
+            { username: "pengelola3", password: "123456789", namaLengkap: "Pengelola Berkala Tiga" },
+            { username: "pengelola4", password: "123456789", namaLengkap: "Pengelola Berkala Empat" },
+            { username: "pengelola5", password: "123456789", namaLengkap: "Pengelola Berkala Lima" },
+            { username: "pengelola6", password: "123456789", namaLengkap: "Pengelola Berkala Enam" },
+            { username: "pengelola7", password: "123456789", namaLengkap: "Pengelola Berkala Tujuh" },
+            { username: "pengelola8", password: "123456789", namaLengkap: "Pengelola Berkala Delapan" },
+            { username: "pengelola9", password: "123456789", namaLengkap: "Pengelola Berkala Sembilan" },
+            { username: "pengelola10", password: "123456789", namaLengkap: "Pengelola Berkala Sepuluh" },
+            { username: "pengelola11", password: "123456789", namaLengkap: "Pengelola Berkala Sebelas" },
+            { username: "pengelola12", password: "123456789", namaLengkap: "Pengelola Berkala Dua Belas" },
+            { username: "pengelola13", password: "123456789", namaLengkap: "Pengelola Berkala Tiga Belas" },
+            { username: "admin", password: "admin", namaLengkap: "Administrator Master" }
+        ];
+        
+        let currentUser = null;
+        let lettersDatabase = [];
+        
+        // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
+        const kopSuratHTML = `
+            <div style="width: 100%; margin-bottom: 16px; text-align: center;">
+                <img src="https://lh3.googleusercontent.com/d/1japtuTk8FPjx7oUCdiBB1eC_q-7gThGH" style="width: 100%; height: auto;" alt="Kop Surat Dinas Pendidikan dan Kebudayaan Provinsi NTT" onerror="this.onerror=null; this.alt='Gambar Kop Surat gagal dimuat. Pastikan setelan file di Google Drive adalah Siapa saja yang memiliki link (Anyone with the link).';">
+            </div>
+        `;
+
+        const daftarKabKot = [
+            "Kabupaten Alor", "Kabupaten Belu", "Kabupaten Ende", "Kabupaten Flores Timur",
+            "Kabupaten Kupang", "Kabupaten Lembata", "Kabupaten Malaka", "Kabupaten Manggarai",
+            "Kabupaten Manggarai Barat", "Kabupaten Manggarai Timur", "Kabupaten Nagekeo",
+            "Kabupaten Ngada", "Kabupaten Rote Ndao", "Kabupaten Sabu Raijua", "Kabupaten Sikka",
+            "Kabupaten Sumba Barat", "Kabupaten Sumba Barat Daya", "Kabupaten Sumba Tengah",
+            "Kabupaten Sumba Timur", "Kabupaten Timor Tengah Selatan", "Kabupaten Timor Tengah Utara", "Kota Kupang"
+        ];
+
+        const pangkatPNS = [
+            { label: "Juru Muda (I/a)", base: 1685700 }, { label: "Juru Muda Tingkat I (I/b)", base: 1840800 },
+            { label: "Juru (I/c)", base: 1918700 }, { label: "Juru Tingkat I (I/d)", base: 1999900 },
+            { label: "Pengatur Muda (II/a)", base: 2184000 }, { label: "Pengatur Muda Tingkat I (II/b)", base: 2385000 },
+            { label: "Pengatur (II/c)", base: 2485900 }, { label: "Pengatur Tingkat I (II/d)", base: 2591100 },
+            { label: "Penata Muda (III/a)", base: 2785700 }, { label: "Penata Muda Tingkat I (III/b)", base: 2903600 },
+            { label: "Penata (III/c)", base: 3026400 }, { label: "Penata Tingkat I (III/d)", base: 3154400 },
+            { label: "Pembina (IV/a)", base: 3287800 }, { label: "Pembina Tingkat I (IV/b)", base: 3426900 },
+            { label: "Pembina Utama Muda (IV/c)", base: 3571900 }, { label: "Pembina Utama Madya (IV/d)", base: 3723000 },
+            { label: "Pembina Utama (IV/e)", base: 3880400 }
+        ];
+
+        const pangkatPPPK = [
+            { label: "Golongan I", base: 1938500 }, { label: "Golongan II", base: 2116900 },
+            { label: "Golongan III", base: 2206500 }, { label: "Golongan IV", base: 2299800 },
+            { label: "Golongan V", base: 2511500 }, { label: "Golongan VI", base: 2742800 },
+            { label: "Golongan VII", base: 2858800 }, { label: "Golongan VIII", base: 2979700 },
+            { label: "Golongan IX", base: 3203600 }, { label: "Golongan X", base: 3339100 },
+            { label: "Golongan XI", base: 3480300 }, { label: "Golongan XII", base: 3627500 },
+            { label: "Golongan XIII", base: 3781000 }, { label: "Golongan XIV", base: 3940900 },
+            { label: "Golongan XV", base: 4107600 }, { label: "Golongan XVI", base: 4281400 },
+            { label: "Golongan XVII", base: 4462500 }
+        ];
+
+        window.onload = function() {
+            populateDropdowns();
+            setDefaultDates();
+        };
+
+        function showToast(title, message, isSuccess = true) {
+            const toast = document.getElementById('toast-notification');
+            const icon = document.getElementById('toast-icon');
+            document.getElementById('toast-title').innerText = title;
+            document.getElementById('toast-msg').innerText = message;
+            
+            if (isSuccess) {
+                toast.classList.remove('border-red-200', 'bg-red-50');
+                toast.classList.add('border-emerald-200', 'bg-white');
+                icon.innerHTML = '<i class="fas fa-check-circle text-emerald-500"></i>';
+                document.getElementById('toast-title').classList.replace('text-red-800', 'text-gray-900');
+            } else {
+                toast.classList.remove('border-emerald-200', 'bg-white');
+                toast.classList.add('border-red-200', 'bg-red-50');
+                icon.innerHTML = '<i class="fas fa-exclamation-triangle text-red-500"></i>';
+                document.getElementById('toast-title').classList.replace('text-gray-900', 'text-red-800');
+            }
+            
+            toast.classList.remove('hidden', 'toast-exit');
+            toast.classList.add('toast-enter');
+            setTimeout(() => { closeToast(); }, 5000);
+        }
+
+        function closeToast() {
+            const toast = document.getElementById('toast-notification');
+            toast.classList.remove('toast-enter');
+            toast.classList.add('toast-exit');
+            setTimeout(() => { toast.classList.add('hidden'); }, 500);
+        }
+
+        function populateDropdowns() {
+            const kabKotSelect = document.getElementById('pegawai-kabkot');
+            const reportFilter = document.getElementById('report-kabkot-filter');
+            
+            if (kabKotSelect) kabKotSelect.innerHTML = '';
+            if (reportFilter) reportFilter.innerHTML = '<option value="">Semua Wilayah NTT</option>';
+
+            daftarKabKot.forEach(kab => {
+                if (kabKotSelect) kabKotSelect.innerHTML += `<option value="${kab}">${kab}</option>`;
+                if (reportFilter) reportFilter.innerHTML += `<option value="${kab}">${kab}</option>`;
+            });
+            onStatusPegawaiChange();
+        }
+
+        function onStatusPegawaiChange() {
+            const status = document.getElementById('pegawai-status').value;
+            const pangkatSelect = document.getElementById('pegawai-pangkat');
+            const labelNip = document.getElementById('label-nip');
+
+            if (!pangkatSelect) return;
+            pangkatSelect.innerHTML = '';
+
+            if (status === 'PNS') {
+                if (labelNip) labelNip.innerHTML = 'NIP PNS *';
+                pangkatPNS.forEach(p => {
+                    pangkatSelect.innerHTML += `<option value="${p.label}">${p.label}</option>`;
+                });
+                pangkatSelect.value = "Penata Tk.I (III/d)";
+            } else {
+                if (labelNip) labelNip.innerHTML = 'NI PPPK *';
+                pangkatPPPK.forEach(p => {
+                    pangkatSelect.innerHTML += `<option value="${p.label}">${p.label}</option>`;
+                });
+            }
+            calculateSalary();
+        }
+
+        function setDefaultDates() {
+            const today = new Date().toISOString().split('T')[0];
+            const ids = ['sk-tanggal', 'sk-tmt', 'gaji-tmt-baru', 'surat-tanggal'];
+            ids.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = today;
+            });
+        }
+
+        function calculateSalary() {
+            const status = document.getElementById('pegawai-status').value;
+            const pangkatVal = document.getElementById('pegawai-pangkat').value;
+            const mkLama = parseInt(document.getElementById('mk-lama-thn').value) || 0;
+            const mkBaru = parseInt(document.getElementById('mk-baru-thn').value) || 0;
+
+            let listData = (status === 'PNS') ? pangkatPNS : pangkatPPPK;
+            let found = listData.find(item => item.label === pangkatVal) || listData[0];
+
+            let stepLama = Math.min(Math.floor(mkLama / 2), 16);
+            let stepBaru = Math.min(Math.floor(mkBaru / 2), 16);
+            
+            let calcLama = Math.round(found.base * Math.pow(1.0315, stepLama));
+            let valLama = Math.round(calcLama / 100) * 100;
+            let calcBaru = Math.round(found.base * Math.pow(1.0315, stepBaru));
+            let valBaru = Math.round(calcBaru / 100) * 100;
+
+            const gajiLamaInput = document.getElementById('gaji-lama');
+            const gajiBaruInput = document.getElementById('gaji-baru');
+
+            if (gajiLamaInput) gajiLamaInput.value = `Rp. ${valLama.toLocaleString('id-ID')},-`;
+            if (gajiBaruInput) gajiBaruInput.value = `Rp. ${valBaru.toLocaleString('id-ID')},-`;
+        }
+
+        function navigate(viewId) {
+            document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.nav-btn').forEach(el => {
+                el.classList.remove('border-blue-600', 'text-blue-600');
+                el.classList.add('border-transparent', 'text-gray-500');
+            });
+
+            const targetView = document.getElementById(`view-${viewId}`);
+            if (targetView) targetView.classList.remove('hidden');
+
+            const activeBtn = document.getElementById(`nav-${viewId}`);
+            if (activeBtn) {
+                activeBtn.classList.remove('border-transparent', 'text-gray-500');
+                activeBtn.classList.add('border-blue-600', 'text-blue-600');
+            }
+
+            if (viewId === 'dashboard') updateDashboardStats();
+            if (viewId === 'list') renderHistoryTable();
+            if (viewId === 'report') renderReport();
+        }
+
+        function login(e) {
+            if (e) e.preventDefault();
+            const user = document.getElementById('username').value.trim();
+            const pass = document.getElementById('password').value.trim();
+            const errorMsg = document.getElementById('login-error-msg');
+
+            const matchedUser = usersDatabase.find(u => u.username === user && u.password === pass);
+
+            if (matchedUser) {
+                currentUser = matchedUser;
+                document.getElementById('active-user-name').innerHTML = `<i class="fas fa-user-circle mr-1.5 text-sm"></i> <span class="truncate">${currentUser.namaLengkap}</span>`;
+                document.getElementById('welcome-message').innerText = `Selamat Datang, ${currentUser.namaLengkap.split(' ')[0]}`;
+                
+                if (errorMsg) errorMsg.classList.add('hidden');
+                document.getElementById('login-page').classList.add('hidden');
+                document.getElementById('main-app').classList.remove('hidden');
+                navigate('dashboard');
+                document.getElementById('username').value = '';
+                document.getElementById('password').value = '';
+                
+                showToast("Login Berhasil", `Anda masuk sebagai ${currentUser.namaLengkap}`, true);
+            } else {
+                if (errorMsg) errorMsg.classList.remove('hidden');
+            }
+        }
+
+        function logout() {
+            currentUser = null;
+            document.getElementById('main-app').classList.add('hidden');
+            document.getElementById('login-page').classList.remove('hidden');
+        }
+
+        function resetForm() {
+            document.getElementById('kgb-form').reset();
+            setDefaultDates();
+            onStatusPegawaiChange();
+            showToast("Form Dikosongkan", "Formulir siap untuk data baru.", true);
+        }
+
+        function submitKgbForm(e) {
+            if (e) e.preventDefault();
+            
+            const submitBtn = document.getElementById('btn-submit-form');
+            const originalBtnHtml = submitBtn.innerHTML;
+            
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin text-lg"></i><span>Menyimpan ke Database...</span>';
+            submitBtn.disabled = true;
+            submitBtn.classList.add('opacity-75', 'cursor-not-allowed');
+
+            const formData = {
+                id: "KGB-" + new Date().getFullYear() + "-" + Math.floor(1000 + Math.random() * 9000),
+                statusPegawai: document.getElementById('pegawai-status').value,
+                nama: document.getElementById('pegawai-nama').value,
+                nip: document.getElementById('pegawai-nip').value,
+                pangkat: document.getElementById('pegawai-pangkat').value,
+                jabatan: document.getElementById('pegawai-jabatan').value,
+                unit: document.getElementById('pegawai-unit').value,
+                kabkot: document.getElementById('pegawai-kabkot').value,
+                skPejabat: document.getElementById('sk-pejabat').value,
+                skTanggal: document.getElementById('sk-tanggal').value,
+                skNomor: document.getElementById('sk-nomor').value,
+                skTmt: document.getElementById('sk-tmt').value,
+                mkLamaThn: document.getElementById('mk-lama-thn').value,
+                mkLamaBln: document.getElementById('mk-lama-bln').value,
+                gajiLama: document.getElementById('gaji-lama').value,
+                mkBaruThn: document.getElementById('mk-baru-thn').value,
+                mkBaruBln: document.getElementById('mk-baru-bln').value,
+                gajiBaruTmt: document.getElementById('gaji-tmt-baru').value,
+                gajiBaru: document.getElementById('gaji-baru').value,
+                suratNomor: document.getElementById('surat-nomor').value,
+                suratTanggal: document.getElementById('surat-tanggal').value,
+                signJabatan: document.getElementById('sign-jabatan').value,
+                signNama: document.getElementById('sign-nama').value,
+                signPangkat: document.getElementById('sign-pangkat').value,
+                signNip: document.getElementById('sign-nip').value,
+                ukuranKertas: document.getElementById('ukuran-kertas').value
+            };
+
+            fetch(scriptURL, {
+                method: 'POST',
+                mode: 'no-cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData) 
+            })
+            .then(response => {
+                showToast("Berhasil Disimpan!", "Data KGB telah masuk ke Spreadsheet.", true);
+                lettersDatabase.unshift(formData);
+                updateDashboardStats();
+                restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
+            })
+            .catch(error => {
+                showToast("Disimpan Lokal", "Terjadi kendala jaringan, data sementara disimpan di riwayat perangkat.", true);
+                lettersDatabase.unshift(formData);
+                updateDashboardStats();
+                restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
+            });
+        }
+
+        function restoreBtnAndPreview(btn, originalHtml, data) {
+            btn.innerHTML = originalHtml;
+            btn.disabled = false;
+            btn.classList.remove('opacity-75', 'cursor-not-allowed');
+            openPrintModal(data);
+        }
+
+        function openPrintModal(data) {
+            const sheet = document.getElementById('printable-letter-sheet');
+            if (!sheet) return;
+            
+            const ukuranKertas = data.ukuranKertas || 'legal';
+            const titleEl = document.getElementById('print-modal-title');
+            
+            sheet.classList.remove('kertas-a4', 'kertas-legal');
+            document.body.classList.remove('print-a4', 'print-legal');
+            
+            if (ukuranKertas === 'a4') {
+                sheet.classList.add('kertas-a4');
+                document.body.classList.add('print-a4');
+                if (titleEl) titleEl.innerText = "Pratinjau Dokumen (A4)";
+            } else {
+                sheet.classList.add('kertas-legal');
+                document.body.classList.add('print-legal');
+                if (titleEl) titleEl.innerText = "Pratinjau Dokumen (Legal/F4)";
+            }
+            
+            const tglSurat = formatDateIndo(data.suratTanggal);
+            const tglSk = formatDateIndo(data.skTanggal);
+            const tglTmtLama = formatDateIndo(data.skTmt);
+            const tglTmtBaru = formatDateIndo(data.gajiBaruTmt);
+            
+            const labelStatusSurat = data.statusPegawai === 'PNS' ? 'Kenaikan Gaji Berkala PNSD' : 'Kenaikan Gaji Berkala PPPK';
+            const refPeraturan = data.statusPegawai === 'PNS' ? 'Peraturan Pemerintah Nomor 5 Tahun 2024' : 'Peraturan Presiden Nomor 11 Tahun 2024';
+            const jenisPegawai = data.statusPegawai === 'PNS' ? 'Pegawai Negeri Sipil' : 'Pegawai Pemerintah dengan Perjanjian Kerja';
+
+            let displayUnit = data.unit || '-';
+            if (data.kabkot && !displayUnit.toLowerCase().includes(data.kabkot.toLowerCase())) {
+                displayUnit = `${displayUnit}, ${data.kabkot}`;
+            }
+
+            const ttd_pengirim = "${ttd_pengirim}"; 
+            const formattedNip = data.signNip.replace(/\s+/g, ''); 
+            
+            sheet.innerHTML = `
+                ${kopSuratHTML}
+
+                <div style="display: flex; justify-content: space-between; margin-bottom: 12px; font-weight: normal;">
+                    <div>
+                        <table style="border-collapse: collapse;">
+                            <tr><td style="padding-right: 16px; vertical-align: top; font-weight: normal;">Nomor</td><td style="padding-right: 8px; vertical-align: top; font-weight: normal;">:</td><td style="vertical-align: top; font-weight: normal;">${data.suratNomor}</td></tr>
+                            <tr><td style="font-weight: normal; vertical-align: top;">Lampiran</td><td style="padding-right: 8px; vertical-align: top; font-weight: normal;">:</td><td style="font-weight: normal; vertical-align: top;">-</td></tr>
+                            <tr>
+                                <td style="font-weight: normal; vertical-align: top;">Hal</td>
+                                <td style="padding-right: 8px; vertical-align: top; font-weight: normal;">:</td>
+                                <td style="font-weight: normal; vertical-align: top;">
+                                    <div>${labelStatusSurat}</div>
+                                    <div>a.n. ${data.nama}</div>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div style="text-align: right; font-weight: normal; padding-right: 15px;">
+                        <p style="margin: 0;">${tglSurat}</p>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 12px; font-weight: normal;">
+                    <p style="margin: 0 0 4px 0;">Yth. Gubernur Nusa Tenggara Timur</p>
+                    <p style="margin: 0 0 0 20px;">Cq. Kepala Badan Keuangan Daerah</p>
+                    <p style="margin: 0 0 0 20px;">Provinsi Nusa Tenggara Timur</p>
+                    <p style="margin: 4px 0 0 0;">di -</p>
+                    <p style="margin: 0 0 0 20px;">Kupang</p>
+                </div>
+
+                <div style="text-align: justify; font-weight: normal; margin-bottom: 12px;">
+                    <p style="margin: 0 0 8px 0;">Bersama ini disampaikan bahwa telah dipenuhinya masa kerja dan syarat-syarat lainnya, maka kepada:</p>
+                    
+                    <div style="padding-left: 16px; margin-bottom: 8px;">
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr><td style="width: 25px; vertical-align: top;">1.</td><td style="width: 200px; vertical-align: top;">Nama</td><td style="width: 10px; vertical-align: top;">:</td><td style="vertical-align: top; font-weight: bold;">${data.nama}</td></tr>
+                            <tr><td style="vertical-align: top;">2.</td><td style="vertical-align: top;">${data.statusPegawai === 'PNS' ? 'NIP' : 'NI PPPK'}</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.nip}</td></tr>
+                            <tr><td style="vertical-align: top;">3.</td><td style="vertical-align: top;">Pangkat/Golongan Ruang</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.pangkat}</td></tr>
+                            <tr><td style="vertical-align: top;">4.</td><td style="vertical-align: top;">Jabatan</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.jabatan}</td></tr>
+                            <tr><td style="vertical-align: top;">5.</td><td style="vertical-align: top;">Unit Kerja</td><td style="vertical-align: top;">:</td><td style="vertical-align: top; text-transform: uppercase;">${displayUnit}</td></tr>
+                            <tr><td style="vertical-align: top;">6.</td><td style="vertical-align: top;">Gaji Pokok Lama</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.gajiLama}</td></tr>
+                        </table>
+                    </div>
+
+                    <p style="margin: 4px 0 8px 0;">Atas Dasar SK Pangkat / Berkala terakhir yang ditetapkan:</p>
+                    <div style="padding-left: 16px; margin-bottom: 8px;">
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr><td style="width: 25px; vertical-align: top;">a.</td><td style="width: 200px; vertical-align: top;">Oleh Pejabat</td><td style="width: 10px; vertical-align: top;">:</td><td style="vertical-align: top;">${data.skPejabat}</td></tr>
+                            <tr><td style="vertical-align: top;">b.</td><td style="vertical-align: top;">Tanggal</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${tglSk}</td></tr>
+                            <tr><td style="vertical-align: top;">c.</td><td style="vertical-align: top;">Nomor</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.skNomor}</td></tr>
+                            <tr><td style="vertical-align: top;">d.</td><td style="vertical-align: top;">Tanggal mulai berlaku gaji</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${tglTmtLama}</td></tr>
+                            <tr><td style="vertical-align: top;">e.</td><td style="vertical-align: top;">Masa kerja golongan</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.mkLamaThn} Tahun ${String(data.mkLamaBln).padStart(2,'0')} Bulan</td></tr>
+                        </table>
+                    </div>
+
+                    <p style="margin: 4px 0 8px 0;">Diberikan Kenaikan Gaji Berkala hingga memperoleh:</p>
+                    <div style="padding-left: 16px; margin-bottom: 8px;">
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr><td style="width: 25px; vertical-align: top;">7.</td><td style="width: 200px; vertical-align: top;">Gaji Pokok Baru</td><td style="width: 10px; vertical-align: top;">:</td><td style="vertical-align: top;">${data.gajiBaru}</td></tr>
+                            <tr><td style="vertical-align: top;">8.</td><td style="vertical-align: top;">Berdasarkan masa kerja</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.mkBaruThn} Tahun ${String(data.mkBaruBln).padStart(2,'0')} Bulan</td></tr>
+                            <tr><td style="vertical-align: top;">9.</td><td style="vertical-align: top;">Dalam Pangkat/Golongan</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${data.pangkat}</td></tr>
+                            <tr><td style="vertical-align: top;">10.</td><td style="vertical-align: top;">Terhitung Mulai Tanggal</td><td style="vertical-align: top;">:</td><td style="vertical-align: top;">${tglTmtBaru}</td></tr>
+                        </table>
+                    </div>
+
+                    <p style="margin: 4px 0 0 0;">Diharapkan agar sesuai dengan ${refPeraturan} kepada ${jenisPegawai} tersebut dapat dibayarkan penghasilan berdasarkan Gaji Pokok Baru.</p>
+                </div>
+
+                <!-- Bagian Tanda Tangan (Berada di Kanan) -->
+                <table style="width: 100%; margin-top: 16px; border: none; font-size: 10pt;">
+                    <tr>
+                        <td style="width: 50%;"></td> <!-- Area kosong di kiri agar Tanda Tangan terdorong ke kanan -->
+                        <td style="width: 50%; padding-left: 20px; vertical-align: top;">
+                            <p style="margin: 0; line-height: 1.2;">Kepala Dinas Pendidikan dan Kebudayaan</p>
+                            <p style="margin: 0; line-height: 1.2;">Provinsi Nusa Tenggara Timur,</p>
+                            
+                            <!-- Turun 3 spasi lalu geser ke kanan untuk placeholder -->
+                            <br><br><br>
+                            <p style="margin: 0; line-height: 1.2;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${ttd_pengirim}</p>
+                            
+                            <!-- Turun 4 spasi untuk Barcode SRIKANDI BSSN -->
+                            <br><br><br><br>
+                            
+                            <!-- Nama Kadis tanpa garis bawah dan ditebalkan -->
+                            <p style="margin: 0; font-weight: bold; line-height: 1.2;">${data.signNama}</p>
+                            <p style="margin: 0; line-height: 1.2;">${data.signPangkat}</p>
+                            <p style="margin: 0; line-height: 1.2;">NIP. ${formattedNip}</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Jarak persis 1 Spasi antara baris NIP Penandatangan dan Tembusan -->
+                <br>
+
+                <!-- Bagian Tembusan (Berada di Kiri Bawah, setelah blok Tanda Tangan selesai) -->
+                <div style="font-size: 9pt; width: 100%;">
+                    <p style="font-weight: bold; margin: 0 0 4px 0;">Tembusan:</p>
+                    <table style="width: 100%; border-collapse: collapse; border: none; font-size: 9pt;">
+                        <tr><td style="width: 15px; vertical-align: top;">1.</td><td style="vertical-align: top;">Kepala Regional X Badan Kepegawaian Negara di Denpasar;</td></tr>
+                        <tr><td style="vertical-align: top;">2.</td><td style="vertical-align: top;">Inspektur Provinsi Nusa Tenggara Timur di Kupang;</td></tr>
+                        <tr><td style="vertical-align: top;">3.</td><td style="vertical-align: top;">Kepala Badan Kepegawaian Daerah Provinsi Nusa Tenggara Timur di Kupang;</td></tr>
+                        <tr><td style="vertical-align: top;">4.</td><td style="vertical-align: top;">Bendaharawan Gaji Dinas Pendidikan dan Kebudayaan Provinsi Nusa Tenggara Timur di Kupang;</td></tr>
+                        <tr><td style="vertical-align: top;">5.</td><td style="vertical-align: top;">Pegawai yang bersangkutan di tempat.</td></tr>
+                    </table>
+                </div>
+            `;
+
+            document.getElementById('print-modal-container').classList.remove('hidden');
+        }
+
+        function closePrintModal() {
+            document.getElementById('print-modal-container').classList.add('hidden');
+            document.body.classList.remove('print-a4', 'print-legal');
+            navigate('list');
+        }
+
+        function triggerPrintAction() {
+            window.print();
+        }
+
+        function formatDateIndo(dateStr) {
+            if (!dateStr) return '-';
+            const bulanIndo = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return dateStr;
+            return `${d.getDate()} ${bulanIndo[d.getMonth()]} ${d.getFullYear()}`;
+        }
+
+        function updateDashboardStats() {
+            const total = lettersDatabase.length;
+            const pnsCount = lettersDatabase.filter(d => d.statusPegawai === 'PNS').length;
+            const pppkCount = lettersDatabase.filter(d => d.statusPegawai === 'PPPK').length;
+
+            const el1 = document.getElementById('stat-total');
+            const el2 = document.getElementById('stat-pns');
+            const el3 = document.getElementById('stat-pppk');
+
+            if (el1) el1.innerText = total;
+            if (el2) el2.innerText = pnsCount;
+            if (el3) el3.innerText = pppkCount;
+        }
+
+        function renderHistoryTable() {
+            const searchInput = document.getElementById('search-history');
+            const keyword = searchInput ? searchInput.value.toLowerCase() : '';
+            const tbody = document.getElementById('history-table-body');
+            if (!tbody) return;
+
+            tbody.innerHTML = '';
+            const filtered = lettersDatabase.filter(item => 
+                item.nama.toLowerCase().includes(keyword) || item.nip.toLowerCase().includes(keyword)
+            );
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-400 font-medium"><i class="fas fa-folder-open text-3xl mb-3 block"></i>Belum ada arsip surat.</td></tr>`;
+                return;
+            }
+
+            filtered.forEach((item, index) => {
+                tbody.innerHTML += `
+                    <tr class="hover:bg-slate-50 transition border-b border-gray-100">
+                        <td class="py-3 px-4 font-medium text-gray-500">${index + 1}</td>
+                        <td class="py-3 px-4">
+                            <div class="font-bold text-gray-900">${item.nama}</div>
+                            <div class="text-[11px] font-mono text-gray-500">${item.nip}</div>
+                        </td>
+                        <td class="py-3 px-4">
+                            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full ${item.statusPegawai === 'PNS' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${item.statusPegawai}</span>
+                            <div class="text-xs text-gray-600 mt-1">${item.pangkat}</div>
+                        </td>
+                        <td class="py-3 px-4 text-xs font-medium text-gray-700">${item.kabkot}</td>
+                        <td class="py-3 px-4 font-bold text-emerald-700">${item.gajiBaru}</td>
+                        <td class="py-3 px-4 text-xs text-gray-500">${formatDateIndo(item.suratTanggal)}</td>
+                        <td class="py-3 px-4 text-center space-x-1 whitespace-nowrap">
+                            <button onclick="openPrintModalById('${item.id}')" class="bg-blue-50 hover:bg-blue-600 hover:text-white text-blue-600 p-2 rounded-lg transition" title="Cetak Surat">
+                                <i class="fas fa-print"></i>
+                            </button>
+                            <button onclick="deleteHistoryItem('${item.id}')" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus Arsip Lokal">
+                                <i class="fas fa-trash-can"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        function openPrintModalById(id) {
+            const item = lettersDatabase.find(d => d.id === id);
+            if (item) openPrintModal(item);
+        }
+
+        function deleteHistoryItem(id) {
+            lettersDatabase = lettersDatabase.filter(d => d.id !== id);
+            renderHistoryTable();
+            updateDashboardStats();
+            renderReport();
+        }
+
+        function renderReport() {
+            const kabFilterEl = document.getElementById('report-kabkot-filter');
+            const monthFilterEl = document.getElementById('report-month-filter');
+            const tbody = document.getElementById('report-table-body');
+            if (!tbody) return;
+
+            const kabFilter = kabFilterEl ? kabFilterEl.value : "";
+            const monthFilter = monthFilterEl ? monthFilterEl.value : "";
+            tbody.innerHTML = '';
+
+            let filtered = lettersDatabase.filter(item => {
+                let matchKab = kabFilter === "" || item.kabkot === kabFilter;
+                let matchMonth = true;
+                if (monthFilter) {
+                    const itemMonth = item.suratTanggal.substring(0, 7);
+                    matchMonth = itemMonth === monthFilter;
+                }
+                return matchKab && matchMonth;
+            });
+
+            const rTotal = document.getElementById('report-total-count');
+            const rPns = document.getElementById('report-pns-count');
+            const rPppk = document.getElementById('report-pppk-count');
+
+            if (rTotal) rTotal.innerText = filtered.length;
+            if (rPns) rPns.innerText = filtered.filter(d => d.statusPegawai === 'PNS').length;
+            if (rPppk) rPppk.innerText = filtered.filter(d => d.statusPegawai === 'PPPK').length;
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-8 text-gray-400 font-medium">Tidak ada data rekapitulasi.</td></tr>`;
+                return;
+            }
+
+            filtered.forEach((item, index) => {
+                tbody.innerHTML += `
+                    <tr class="hover:bg-slate-50 transition border-b border-gray-100">
+                        <td class="py-2.5 px-4 font-medium text-gray-500">${index + 1}</td>
+                        <td class="py-2.5 px-4 font-semibold text-gray-800 text-xs">${item.kabkot}</td>
+                        <td class="py-2.5 px-4">
+                            <div class="font-bold text-gray-900">${item.nama}</div>
+                            <div class="text-[10px] font-mono text-gray-500">${item.nip}</div>
+                        </td>
+                        <td class="py-2.5 px-4">
+                            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full ${item.statusPegawai === 'PNS' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${item.statusPegawai}</span>
+                            <div class="text-xs text-gray-600 mt-1 truncate max-w-[150px]">${item.pangkat}</div>
+                        </td>
+                        <td class="py-2.5 px-4 text-xs text-gray-500">${formatDateIndo(item.suratTanggal)}</td>
+                        <td class="py-2.5 px-4 text-xs text-gray-700 font-medium">${formatDateIndo(item.gajiBaruTmt)}</td>
+                        <td class="py-2.5 px-4 font-bold text-emerald-700 text-right whitespace-nowrap">${item.gajiBaru}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        function printReportAction() {
+            document.body.classList.remove('print-a4');
+            document.body.classList.add('print-legal');
+
+            const kabFilter = document.getElementById('report-kabkot-filter').value;
+            const monthFilter = document.getElementById('report-month-filter').value;
+
+            let filtered = lettersDatabase.filter(item => {
+                let matchKab = kabFilter === "" || item.kabkot === kabFilter;
+                let matchMonth = true;
+                if (monthFilter) {
+                    const itemMonth = item.suratTanggal.substring(0, 7);
+                    matchMonth = itemMonth === monthFilter;
+                }
+                return matchKab && matchMonth;
+            });
+
+            const titleKab = kabFilter !== "" ? kabFilter : "Seluruh Wilayah Provinsi NTT";
+            const titlePeriode = monthFilter !== "" ? `Bulan: ${monthFilter}` : "Semua Periode";
+            const todayStr = formatDateIndo(new Date().toISOString().split('T')[0]);
+            const sheet = document.getElementById('printable-report-sheet');
+
+            let rowsHtml = "";
+            filtered.forEach((item, index) => {
+                rowsHtml += `
+                    <tr style="border-bottom: 1px solid #000;">
+                        <td style="padding: 6px; text-align: center; border: 1px solid #000;">${index + 1}</td>
+                        <td style="padding: 6px; border: 1px solid #000;">${item.kabkot}</td>
+                        <td style="padding: 6px; border: 1px solid #000;"><span style="font-weight: normal;">${item.nama}</span><br><span style="font-size: 9pt; color: #333;">${item.nip}</span></td>
+                        <td style="padding: 6px; text-align: center; border: 1px solid #000;">${item.statusPegawai}</td>
+                        <td style="padding: 6px; border: 1px solid #000;">${item.pangkat}</td>
+                        <td style="padding: 6px; text-align: center; border: 1px solid #000;">${formatDateIndo(item.suratTanggal)}</td>
+                        <td style="padding: 6px; text-align: center; border: 1px solid #000;">${formatDateIndo(item.gajiBaruTmt)}</td>
+                        <td style="padding: 6px; text-align: right; border: 1px solid #000;">${item.gajiBaru}</td>
+                    </tr>
+                `;
+            });
+
+            sheet.innerHTML = `
+                ${kopSuratHTML}
+                <div style="margin-bottom: 16px; font-size: 10pt; font-weight: normal; line-height: 1.2;">
+                    <div style="text-align: center; font-weight: bold; text-transform: uppercase; margin-bottom: 12px; font-size: 11pt;">Laporan Rekapitulasi KGB</div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                        <span><b>Cakupan Wilayah:</b> ${titleKab}</span>
+                        <span><b>Tanggal Cetak:</b> ${todayStr}</span>
+                    </div>
+                    <div style="margin-bottom: 4px;"><b>Periode:</b> ${titlePeriode} | <b>Total:</b> ${filtered.length} Orang</div>
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 9pt; margin-bottom: 30px; border: 1px solid #000;">
+                    <thead>
+                        <tr style="background-color: #f1f5f9; border-bottom: 2px solid #000;">
+                            <th style="padding: 6px; border: 1px solid #000;">No</th>
+                            <th style="padding: 6px; text-align: left; border: 1px solid #000;">Kabupaten / Kota</th>
+                            <th style="padding: 6px; text-align: left; border: 1px solid #000;">Nama & NIP Pegawai</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #000;">Status</th>
+                            <th style="padding: 6px; text-align: left; border: 1px solid #000;">Pangkat / Gol</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #000;">Tgl Buat</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #000;">TMT Baru</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #000;">Gaji Baru</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+            `;
+
+            document.getElementById('report-print-container').classList.remove('hidden');
+        }
+
+        function closeReportPrintModal() {
+            document.getElementById('report-print-container').classList.add('hidden');
+            document.body.classList.remove('print-legal', 'print-a4');
+        }
+
+        function exportToCSV() {
+            const kabFilter = document.getElementById('report-kabkot-filter').value;
+            const monthFilter = document.getElementById('report-month-filter').value;
+            let filtered = lettersDatabase.filter(item => 
+                (kabFilter === "" || item.kabkot === kabFilter) && 
+                (!monthFilter || item.suratTanggal.substring(0, 7) === monthFilter)
+            );
+
+            const headers = ["ID Surat", "Status Pegawai", "Nama Lengkap", "NIP", "Pangkat", "Jabatan", "Unit Kerja", "Kabupaten", "TMT Lama", "Gaji Lama", "TMT Baru", "Gaji Baru", "Tanggal Surat"];
+            let csvContent = headers.join(",") + "\n";
+
+            filtered.forEach(item => {
+                let row = [
+                    item.id, item.statusPegawai, `"${item.nama}"`, `"${item.nip}"`, `"${item.pangkat}"`, `"${item.jabatan}"`, `"${item.unit}"`, `"${item.kabkot}"`,
+                    item.skTmt, `"${item.gajiLama}"`, item.gajiBaruTmt, `"${item.gajiBaru}"`, item.suratTanggal
+                ];
+                csvContent += row.join(",") + "\n";
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "Data_SIPSID_KGB_NTT.csv";
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
+</body>
+</html>
