@@ -28,47 +28,104 @@ function doGet(e) {
       }
     }
     
-    // 2. Baca Data Gaji (Tarik Angka Saja, Persis Sesuai Sheet Master_Gaji_Pangkat Tanpa Modifikasi/Pembulatan)
-    var sheetGaji = ss.getSheetByName("Master_Gaji_Pangkat");
-    if(sheetGaji) {
-      var gajiValues = sheetGaji.getDataRange().getValues();
-      for (var j = 1; j < gajiValues.length; j++) {
-        var row = gajiValues[j];
-        var statusPegawai = String(row[0]).trim().toUpperCase();
-        var masaKerja = parseInt(row[1]) || 0;
-        var pangkat = String(row[2]).trim();
-        
-        // Ambil nilai nominal mentah dari kolom index 3 (D) dan pastikan berupa angka murni
-        var rawNominal = row[3];
-        var nominalNum = 0;
-        
-        if (typeof rawNominal === 'number') {
-          nominalNum = rawNominal;
-        } else if (typeof rawNominal === 'string') {
-          // Bersihkan string dari simbol mata uang, titik, atau koma desimal ekstra jika ada
-          var cleanStr = rawNominal.replace(/[^0-9]/g, '');
-          nominalNum = parseInt(cleanStr) || 0;
-        }
-        
-        if (statusPegawai === "PNS") {
-          serverPayload.gajiPNS.push({ mkg: masaKerja, pangkat: pangkat, nominal: String(nominalNum) });
-        } else if (statusPegawai === "PPPK") {
-          serverPayload.gajiPPPK.push({ mkg: masaKerja, pangkat: pangkat, nominal: String(nominalNum) });
-        }
-      }
+    // 2. Baca data gaji dari tabel silang Master_Gaji_Pangkat.
+    var salaryPayload = readMasterGaji_();
+    if (salaryPayload.status !== "success") {
+      throw new Error(salaryPayload.errorMsg);
     }
+    serverPayload.gajiPNS = salaryPayload.gajiPNS;
+    serverPayload.gajiPPPK = salaryPayload.gajiPPPK;
   } catch(e) {
     serverPayload.status = "error";
     serverPayload.errorMsg = e.toString();
   }
   
-  // Suntikkan data secara aman ke HTML
-  template.serverData = JSON.stringify(serverPayload);
+  // Suntikkan data sebagai JSON yang aman untuk konteks <script> di template HTML.
+  template.serverData = JSON.stringify(serverPayload)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
   
   return template.evaluate()
     .setTitle('SIPSID-KGB NTT')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function getMasterGaji() {
+  return readMasterGaji_();
+}
+
+function readMasterGaji_() {
+  var result = {
+    status: "success",
+    gajiPNS: [],
+    gajiPPPK: [],
+    errorMsg: ""
+  };
+
+  try {
+    var ss = SpreadsheetApp.openById("1ZwZRVDmgYivLL5NpcwA0OixR2iN6yioQs38J4ftEAvY");
+    var sheetGaji = ss.getSheetByName("Master_Gaji_Pangkat");
+    if (!sheetGaji) {
+      throw new Error("Sheet Master_Gaji_Pangkat tidak ditemukan.");
+    }
+
+    var gajiRange = sheetGaji.getDataRange();
+    var gajiValues = gajiRange.getValues();
+    var gajiDisplayValues = gajiRange.getDisplayValues();
+    var headers = gajiDisplayValues[0] || [];
+
+    for (var i = 1; i < gajiValues.length; i++) {
+      var row = gajiValues[i];
+      var displayRow = gajiDisplayValues[i];
+      var statusPegawai = String(displayRow[0]).trim().toUpperCase();
+      var pangkat = String(displayRow[1]).trim();
+
+      if ((statusPegawai !== "PNS" && statusPegawai !== "PPPK") || !pangkat) {
+        continue;
+      }
+
+      for (var j = 2; j < headers.length; j++) {
+        var headerMatch = String(headers[j]).match(/MKG\s*(\d+)\s*Tahun/i);
+        if (!headerMatch) continue;
+
+        var nominal = normalizeNominalGaji_(row[j], displayRow[j]);
+        if (nominal === null || nominal === "0") continue;
+
+        var salaryItem = {
+          mkg: Number(headerMatch[1]),
+          pangkat: pangkat,
+          nominal: nominal
+        };
+
+        if (statusPegawai === "PNS") {
+          result.gajiPNS.push(salaryItem);
+        } else {
+          result.gajiPPPK.push(salaryItem);
+        }
+      }
+    }
+  } catch (error) {
+    result.status = "error";
+    result.errorMsg = error.toString();
+  }
+
+  return result;
+}
+
+function normalizeNominalGaji_(rawValue, displayValue) {
+  if (typeof rawValue === "number" && isFinite(rawValue)) {
+    return String(rawValue);
+  }
+
+  var nominalText = String(displayValue || rawValue || "").trim();
+  if (!nominalText) return null;
+
+  var digitsOnly = nominalText.replace(/[^0-9]/g, "");
+  return digitsOnly || null;
 }
 
 function doPost(e) {

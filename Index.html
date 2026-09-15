@@ -297,7 +297,7 @@
                                 </div>
                                 <div>
                                     <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Gaji Pokok Lama (Bisa Diedit) *</label>
-                                    <input type="text" id="gaji-lama" class="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-semibold text-gray-800 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-sm transition" required>
+                                    <input type="text" id="gaji-lama" oninput="this.setCustomValidity('')" class="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-xl text-sm font-semibold text-gray-800 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-sm transition" required>
                                 </div>
                             </div>
                         </div>
@@ -322,7 +322,7 @@
                                 </div>
                                 <div>
                                     <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Gaji Pokok Baru (Bisa Diedit) *</label>
-                                    <input type="text" id="gaji-baru" class="w-full px-3 py-2.5 bg-white border border-emerald-400 rounded-xl text-sm font-black text-emerald-700 focus:ring-2 focus:ring-emerald-500 focus:outline-none shadow-md transition" required>
+                                    <input type="text" id="gaji-baru" oninput="this.setCustomValidity('')" class="w-full px-3 py-2.5 bg-white border border-emerald-400 rounded-xl text-sm font-black text-emerald-700 focus:ring-2 focus:ring-emerald-500 focus:outline-none shadow-md transition" required>
                                 </div>
                                 <div class="md:col-span-2">
                                     <label class="block text-[11px] font-bold text-gray-700 uppercase mb-1">Nomor Surat KGB *</label>
@@ -541,6 +541,10 @@
         // Sudah diperbarui ke link Aplikasi Web Web App Anda
         // =========================================================================
         const scriptURL = 'https://script.google.com/macros/s/AKfycbwijUtSn0WBRxU4Fnh7CKoKrLNZzoCpKgjPAfQ1RgIrVPy97ByKSojAGuYlvGoD4CkIxw/exec';
+        const serverData = <?!= serverData ?>;
+        let masterGajiPNS = Array.isArray(serverData.gajiPNS) ? serverData.gajiPNS : [];
+        let masterGajiPPPK = Array.isArray(serverData.gajiPPPK) ? serverData.gajiPPPK : [];
+        let masterGajiError = serverData.status === 'error' ? serverData.errorMsg : '';
         
         // =========================================================================
         // DATABASE PENGELOLA
@@ -581,33 +585,32 @@
             "Kabupaten Sumba Timur", "Kabupaten Timor Tengah Selatan", "Kabupaten Timor Tengah Utara", "Kota Kupang"
         ];
 
+        // Daftar ini hanya digunakan untuk label dropdown. Nominal gaji selalu berasal dari Master_Gaji_Pangkat.
         const pangkatPNS = [
-            { label: "Juru Muda (I/a)", base: 1685700 }, { label: "Juru Muda Tingkat I (I/b)", base: 1840800 },
-            { label: "Juru (I/c)", base: 1918700 }, { label: "Juru Tingkat I (I/d)", base: 1999900 },
-            { label: "Pengatur Muda (II/a)", base: 2184000 }, { label: "Pengatur Muda Tingkat I (II/b)", base: 2385000 },
-            { label: "Pengatur (II/c)", base: 2485900 }, { label: "Pengatur Tingkat I (II/d)", base: 2591100 },
-            { label: "Penata Muda (III/a)", base: 2785700 }, { label: "Penata Muda Tingkat I (III/b)", base: 2903600 },
-            { label: "Penata (III/c)", base: 3026400 }, { label: "Penata Tingkat I (III/d)", base: 3154400 },
-            { label: "Pembina (IV/a)", base: 3287800 }, { label: "Pembina Tingkat I (IV/b)", base: 3426900 },
-            { label: "Pembina Utama Muda (IV/c)", base: 3571900 }, { label: "Pembina Utama Madya (IV/d)", base: 3723000 },
-            { label: "Pembina Utama (IV/e)", base: 3880400 }
+            { label: "Juru Muda (I/a)" }, { label: "Juru Muda Tingkat I (I/b)" },
+            { label: "Juru (I/c)" }, { label: "Juru Tingkat I (I/d)" },
+            { label: "Pengatur Muda (II/a)" }, { label: "Pengatur Muda Tingkat I (II/b)" },
+            { label: "Pengatur (II/c)" }, { label: "Pengatur Tingkat I (II/d)" },
+            { label: "Penata Muda (III/a)" }, { label: "Penata Muda Tingkat I (III/b)" },
+            { label: "Penata (III/c)" }, { label: "Penata Tingkat I (III/d)" },
+            { label: "Pembina (IV/a)" }, { label: "Pembina Tingkat I (IV/b)" },
+            { label: "Pembina Utama Muda (IV/c)" }, { label: "Pembina Utama Madya (IV/d)" },
+            { label: "Pembina Utama (IV/e)" }
         ];
 
         const pangkatPPPK = [
-            { label: "Golongan I", base: 1938500 }, { label: "Golongan II", base: 2116900 },
-            { label: "Golongan III", base: 2206500 }, { label: "Golongan IV", base: 2299800 },
-            { label: "Golongan V", base: 2511500 }, { label: "Golongan VI", base: 2742800 },
-            { label: "Golongan VII", base: 2858800 }, { label: "Golongan VIII", base: 2979700 },
-            { label: "Golongan IX", base: 3203600 }, { label: "Golongan X", base: 3339100 },
-            { label: "Golongan XI", base: 3480300 }, { label: "Golongan XII", base: 3627500 },
-            { label: "Golongan XIII", base: 3781000 }, { label: "Golongan XIV", base: 3940900 },
-            { label: "Golongan XV", base: 4107600 }, { label: "Golongan XVI", base: 4281400 },
-            { label: "Golongan XVII", base: 4462500 }
+            { label: "Golongan I" }, { label: "Golongan II" }, { label: "Golongan III" },
+            { label: "Golongan IV" }, { label: "Golongan V" }, { label: "Golongan VI" },
+            { label: "Golongan VII" }, { label: "Golongan VIII" }, { label: "Golongan IX" },
+            { label: "Golongan X" }, { label: "Golongan XI" }, { label: "Golongan XII" },
+            { label: "Golongan XIII" }, { label: "Golongan XIV" }, { label: "Golongan XV" },
+            { label: "Golongan XVI" }, { label: "Golongan XVII" }
         ];
 
         window.onload = function() {
             populateDropdowns();
             setDefaultDates();
+            refreshMasterGaji();
         };
 
         function showToast(title, message, isSuccess = true) {
@@ -667,7 +670,7 @@
                 pangkatPNS.forEach(p => {
                     pangkatSelect.innerHTML += `<option value="${p.label}">${p.label}</option>`;
                 });
-                pangkatSelect.value = "Penata Tk.I (III/d)";
+                pangkatSelect.value = "Penata Tingkat I (III/d)";
             } else {
                 if (labelNip) labelNip.innerHTML = 'NI PPPK *';
                 pangkatPPPK.forEach(p => {
@@ -686,28 +689,87 @@
             });
         }
 
+        function normalizePangkat(value) {
+            const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const kodePns = normalized.match(/[iv]+\s*\/\s*[a-e]/);
+            if (kodePns) return kodePns[0].replace(/\s+/g, '');
+
+            const kodeDalamKurung = normalized.match(/\(([^)]+)\)/);
+            const kodeGolongan = kodeDalamKurung ? kodeDalamKurung[1] : normalized;
+            return kodeGolongan.replace(/^golongan\s+/, '').replace(/\s+/g, '');
+        }
+
+        function findMasterSalary(listData, pangkat, masaKerja) {
+            const normalizedPangkat = normalizePangkat(pangkat);
+            return listData.find(item =>
+                normalizePangkat(item.pangkat) === normalizedPangkat &&
+                Number(item.mkg) === masaKerja
+            );
+        }
+
+        function refreshMasterGaji() {
+            if (typeof google === 'undefined' || !google.script || !google.script.run) {
+                calculateSalary();
+                return;
+            }
+
+            google.script.run
+                .withSuccessHandler(result => {
+                    if (!result || result.status !== 'success') {
+                        masterGajiError = result && result.errorMsg
+                            ? result.errorMsg
+                            : 'Data Master_Gaji_Pangkat gagal dimuat.';
+                        calculateSalary();
+                        return;
+                    }
+
+                    masterGajiPNS = Array.isArray(result.gajiPNS) ? result.gajiPNS : [];
+                    masterGajiPPPK = Array.isArray(result.gajiPPPK) ? result.gajiPPPK : [];
+                    masterGajiError = '';
+                    calculateSalary();
+                })
+                .withFailureHandler(error => {
+                    masterGajiError = error && error.message
+                        ? error.message
+                        : String(error || 'Data Master_Gaji_Pangkat gagal dimuat.');
+                    calculateSalary();
+                })
+                .getMasterGaji();
+        }
+
+        function formatRupiahExact(nominal) {
+            const nominalText = String(nominal).trim();
+            if (!/^\d+(\.\d+)?$/.test(nominalText)) return '';
+
+            const parts = nominalText.split('.');
+            const integerPart = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+            const decimalPart = parts.length > 1 ? `,${parts[1]}` : '';
+            return `Rp. ${integerPart}${decimalPart},-`;
+        }
+
+        function setSalaryFromMaster(input, listData, pangkat, masaKerja) {
+            if (!input) return;
+
+            const salaryRow = findMasterSalary(listData, pangkat, masaKerja);
+            const formattedSalary = salaryRow ? formatRupiahExact(salaryRow.nominal) : '';
+            const masterError = masterGajiError
+                ? `Data gaji gagal dimuat: ${masterGajiError}`
+                : 'Gaji tidak ditemukan pada Master_Gaji_Pangkat untuk pangkat dan masa kerja ini.';
+
+            input.value = formattedSalary;
+            input.setCustomValidity(formattedSalary ? '' : masterError);
+            input.title = formattedSalary ? '' : masterError;
+        }
+
         function calculateSalary() {
             const status = document.getElementById('pegawai-status').value;
             const pangkatVal = document.getElementById('pegawai-pangkat').value;
-            const mkLama = parseInt(document.getElementById('mk-lama-thn').value) || 0;
-            const mkBaru = parseInt(document.getElementById('mk-baru-thn').value) || 0;
+            const mkLama = parseInt(document.getElementById('mk-lama-thn').value, 10) || 0;
+            const mkBaru = parseInt(document.getElementById('mk-baru-thn').value, 10) || 0;
+            const listData = status === 'PNS' ? masterGajiPNS : masterGajiPPPK;
 
-            let listData = (status === 'PNS') ? pangkatPNS : pangkatPPPK;
-            let found = listData.find(item => item.label === pangkatVal) || listData[0];
-
-            let stepLama = Math.min(Math.floor(mkLama / 2), 16);
-            let stepBaru = Math.min(Math.floor(mkBaru / 2), 16);
-            
-            let calcLama = Math.round(found.base * Math.pow(1.0315, stepLama));
-            let valLama = Math.round(calcLama / 100) * 100;
-            let calcBaru = Math.round(found.base * Math.pow(1.0315, stepBaru));
-            let valBaru = Math.round(calcBaru / 100) * 100;
-
-            const gajiLamaInput = document.getElementById('gaji-lama');
-            const gajiBaruInput = document.getElementById('gaji-baru');
-
-            if (gajiLamaInput) gajiLamaInput.value = `Rp. ${valLama.toLocaleString('id-ID')},-`;
-            if (gajiBaruInput) gajiBaruInput.value = `Rp. ${valBaru.toLocaleString('id-ID')},-`;
+            setSalaryFromMaster(document.getElementById('gaji-lama'), listData, pangkatVal, mkLama);
+            setSalaryFromMaster(document.getElementById('gaji-baru'), listData, pangkatVal, mkBaru);
         }
 
         function navigate(viewId) {
