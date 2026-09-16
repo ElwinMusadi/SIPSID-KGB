@@ -1,0 +1,9 @@
+dist/
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.clasp.json
+.clasprc.json
+*.log

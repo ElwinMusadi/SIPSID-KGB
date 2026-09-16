@@ -1,0 +1,17 @@
+{
+  "name": "sipsid-kgb",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:pages && npm run build:gas",
+    "build:pages": "node scripts/build-pages.mjs",
+    "build:gas": "node scripts/build-gas.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "dev:pages": "npm run build:pages && wrangler pages dev dist",
+    "push:gas": "npm run build:gas && node scripts/push-gas.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.37.1"
+  }
+}
