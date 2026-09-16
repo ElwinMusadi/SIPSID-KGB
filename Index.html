@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SIPSID-KGB - Dinas Pendidikan dan Kebudayaan Provinsi NTT</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
@@ -381,7 +383,7 @@
                     <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-gray-200 gap-4">
                         <div>
                             <h2 class="text-xl font-bold text-gray-800">Arsip Pembuatan Surat KGB</h2>
-                            <p class="text-xs text-gray-500 mt-1">Riwayat seluruh surat Kenaikan Gaji Berkala yang telah dibuat di perangkat ini.</p>
+                            <p class="text-xs text-gray-500 mt-1">Riwayat seluruh surat Kenaikan Gaji Berkala dari Spreadsheet Database_Surat.</p>
                         </div>
                         <div class="w-full sm:w-80 relative">
                             <i class="fas fa-search absolute left-3 top-3 text-gray-400"></i>
@@ -490,8 +492,8 @@
                     <h3 id="print-modal-title" class="font-bold text-sm sm:text-base">Pratinjau Surat KGB</h3>
                 </div>
                 <div class="flex items-center space-x-3">
-                    <button onclick="triggerPrintAction()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center space-x-2 shadow-lg">
-                        <i class="fas fa-print"></i><span class="hidden sm:inline">Cetak / Simpan PDF</span><span class="sm:hidden">Cetak</span>
+                    <button onclick="downloadLetterPdf()" id="btn-download-pdf" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center space-x-2 shadow-lg">
+                        <i class="fas fa-download"></i><span class="hidden sm:inline">Download PDF</span><span class="sm:hidden">Download</span>
                     </button>
                     <button onclick="closePrintModal()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 hover:text-white p-2.5 rounded-xl transition">
                         <i class="fas fa-xmark text-lg"></i>
@@ -568,6 +570,9 @@
         
         let currentUser = null;
         let lettersDatabase = [];
+        let arsipSuratLoaded = false;
+        let arsipSuratLoading = false;
+        let activeLetterData = null;
         
         // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
         const kopSuratHTML = `
@@ -788,9 +793,15 @@
                 activeBtn.classList.add('border-blue-600', 'text-blue-600');
             }
 
-            if (viewId === 'dashboard') updateDashboardStats();
-            if (viewId === 'list') renderHistoryTable();
-            if (viewId === 'report') renderReport();
+            if (viewId === 'dashboard') {
+                updateDashboardStats();
+                loadArsipSurat();
+            }
+            if (viewId === 'list') loadArsipSurat(true);
+            if (viewId === 'report') {
+                renderReport();
+                loadArsipSurat();
+            }
         }
 
         function login(e) {
@@ -879,15 +890,21 @@
             })
             .then(response => {
                 showToast("Berhasil Disimpan!", "Data KGB telah masuk ke Spreadsheet.", true);
-                lettersDatabase.unshift(formData);
-                updateDashboardStats();
-                restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
+                    lettersDatabase = lettersDatabase.filter(item => item.id !== formData.id);
+                    lettersDatabase.unshift(formData);
+                    updateDashboardStats();
+                    renderHistoryTable();
+                    renderReport();
+                    restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
             })
             .catch(error => {
                 showToast("Disimpan Lokal", "Terjadi kendala jaringan, data sementara disimpan di riwayat perangkat.", true);
-                lettersDatabase.unshift(formData);
-                updateDashboardStats();
-                restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
+                    lettersDatabase = lettersDatabase.filter(item => item.id !== formData.id);
+                    lettersDatabase.unshift(formData);
+                    updateDashboardStats();
+                    renderHistoryTable();
+                    renderReport();
+                    restoreBtnAndPreview(submitBtn, originalBtnHtml, formData);
             });
         }
 
@@ -901,6 +918,8 @@
         function openPrintModal(data) {
             const sheet = document.getElementById('printable-letter-sheet');
             if (!sheet) return;
+
+            activeLetterData = data;
             
             const ukuranKertas = data.ukuranKertas || 'legal';
             const titleEl = document.getElementById('print-modal-title');
@@ -1052,8 +1071,141 @@
             navigate('list');
         }
 
-        function triggerPrintAction() {
-            window.print();
+        function waitForLetterImages(sheet) {
+            const images = Array.from(sheet.querySelectorAll('img'));
+            return Promise.all(images.map(image => {
+                if (image.complete) return Promise.resolve();
+                return new Promise(resolve => {
+                    image.addEventListener('load', resolve, { once: true });
+                    image.addEventListener('error', resolve, { once: true });
+                });
+            }));
+        }
+
+        function buildLetterPdfFileName(data) {
+            const safePart = value => String(value || '')
+                .trim()
+                .replace(/[^a-zA-Z0-9_-]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+            const nip = safePart(data && data.nip) || 'Tanpa-NIP';
+            const tanggal = safePart(data && data.suratTanggal) || new Date().toISOString().slice(0, 10);
+            return `Surat-KGB-${nip}-${tanggal}.pdf`;
+        }
+
+        async function downloadLetterPdf() {
+            const sheet = document.getElementById('printable-letter-sheet');
+            const button = document.getElementById('btn-download-pdf');
+            const originalButtonHtml = button ? button.innerHTML : '';
+
+            if (!sheet || !activeLetterData) {
+                showToast('PDF Gagal Dibuat', 'Pratinjau surat belum tersedia.', false);
+                return;
+            }
+
+            if (typeof html2canvas !== 'function' || !window.jspdf || !window.jspdf.jsPDF) {
+                showToast('PDF Gagal Dibuat', 'Library pembuat PDF tidak berhasil dimuat. Muat ulang halaman lalu coba kembali.', false);
+                return;
+            }
+
+            try {
+                if (button) {
+                    button.disabled = true;
+                    button.classList.add('opacity-75', 'cursor-not-allowed');
+                    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Menyiapkan PDF...</span>';
+                }
+
+                await waitForLetterImages(sheet);
+
+                const canvas = await html2canvas(sheet, {
+                    scale: 2,
+                    useCORS: true,
+                    allowTaint: false,
+                    backgroundColor: '#ffffff',
+                    logging: false,
+                    scrollX: 0,
+                    scrollY: -window.scrollY
+                });
+
+                const ukuranKertas = activeLetterData.ukuranKertas === 'a4' ? 'a4' : 'legal';
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF({
+                    orientation: 'portrait',
+                    unit: 'mm',
+                    format: ukuranKertas,
+                    compress: true
+                });
+
+                const pageWidth = pdf.internal.pageSize.getWidth();
+                const pageHeight = pdf.internal.pageSize.getHeight();
+                const imageHeight = (canvas.height * pageWidth) / canvas.width;
+                const fitsSinglePage = imageHeight <= pageHeight + 1;
+
+                if (fitsSinglePage) {
+                    pdf.addImage(
+                        canvas.toDataURL('image/jpeg', 0.95),
+                        'JPEG',
+                        0,
+                        0,
+                        pageWidth,
+                        Math.min(imageHeight, pageHeight),
+                        undefined,
+                        'FAST'
+                    );
+                } else {
+                    const renderedPageHeight = Math.round((canvas.width * pageHeight) / pageWidth);
+                    const pageCount = Math.ceil(canvas.height / renderedPageHeight);
+
+                    for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
+                        const sourceOffsetY = pageNumber * renderedPageHeight;
+                        const sourceHeight = Math.min(renderedPageHeight, canvas.height - sourceOffsetY);
+                        const pageCanvas = document.createElement('canvas');
+                        pageCanvas.width = canvas.width;
+                        pageCanvas.height = renderedPageHeight;
+
+                        const pageContext = pageCanvas.getContext('2d');
+                        pageContext.fillStyle = '#ffffff';
+                        pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+                        pageContext.drawImage(
+                            canvas,
+                            0,
+                            sourceOffsetY,
+                            canvas.width,
+                            sourceHeight,
+                            0,
+                            0,
+                            pageCanvas.width,
+                            sourceHeight
+                        );
+
+                        if (pageNumber > 0) {
+                            pdf.addPage(ukuranKertas, 'portrait');
+                        }
+
+                        pdf.addImage(
+                            pageCanvas.toDataURL('image/jpeg', 0.95),
+                            'JPEG',
+                            0,
+                            0,
+                            pageWidth,
+                            pageHeight,
+                            undefined,
+                            'FAST'
+                        );
+                    }
+                }
+
+                pdf.save(buildLetterPdfFileName(activeLetterData));
+                showToast('PDF Berhasil Diunduh', 'Surat KGB telah diunduh ke perangkat Anda.', true);
+            } catch (error) {
+                console.error('Gagal membuat PDF Surat KGB:', error);
+                showToast('PDF Gagal Dibuat', 'Terjadi kendala saat menyiapkan PDF. Periksa koneksi dan coba kembali.', false);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.classList.remove('opacity-75', 'cursor-not-allowed');
+                    button.innerHTML = originalButtonHtml;
+                }
+            }
         }
 
         function formatDateIndo(dateStr) {
@@ -1078,6 +1230,75 @@
             if (el3) el3.innerText = pppkCount;
         }
 
+        function loadArsipSurat(renderArchiveAfterLoad = false) {
+            if (arsipSuratLoading) return;
+
+            if (arsipSuratLoaded) {
+                if (renderArchiveAfterLoad) renderHistoryTable();
+                return;
+            }
+
+            const tbody = document.getElementById('history-table-body');
+            if (renderArchiveAfterLoad && tbody) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-400 font-medium"><i class="fas fa-spinner fa-spin text-3xl mb-3 block"></i>Memuat arsip surat...</td></tr>`;
+            }
+
+            if (typeof google === 'undefined' || !google.script || !google.script.run) {
+                if (renderArchiveAfterLoad) renderHistoryTable();
+                return;
+            }
+
+            arsipSuratLoading = true;
+            google.script.run
+                .withSuccessHandler(result => {
+                    arsipSuratLoading = false;
+                    if (!result || result.status !== 'success') {
+                        const message = result && result.errorMsg
+                            ? result.errorMsg
+                            : 'Data arsip surat gagal dimuat.';
+                        if (tbody) {
+                            tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-red-500 font-medium"><i class="fas fa-triangle-exclamation text-3xl mb-3 block"></i>${escapeHtml(message)}</td></tr>`;
+                        }
+                        showToast('Arsip Gagal Dimuat', message, false);
+                        return;
+                    }
+
+                    lettersDatabase = Array.isArray(result.data) ? result.data : [];
+                    arsipSuratLoaded = true;
+                    renderHistoryTable();
+                    updateDashboardStats();
+                    renderReport();
+                })
+                .withFailureHandler(error => {
+                    arsipSuratLoading = false;
+                    const message = error && error.message
+                        ? error.message
+                        : String(error || 'Data arsip surat gagal dimuat.');
+                    if (tbody) {
+                        tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-red-500 font-medium"><i class="fas fa-triangle-exclamation text-3xl mb-3 block"></i>${escapeHtml(message)}</td></tr>`;
+                    }
+                    showToast('Arsip Gagal Dimuat', message, false);
+                })
+                .getArsipSurat();
+        }
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function escapeJsString(value) {
+            return String(value == null ? '' : value)
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'")
+                .replace(/\r/g, '\\r')
+                .replace(/\n/g, '\\n');
+        }
+
         function renderHistoryTable() {
             const searchInput = document.getElementById('search-history');
             const keyword = searchInput ? searchInput.value.toLowerCase() : '';
@@ -1086,7 +1307,8 @@
 
             tbody.innerHTML = '';
             const filtered = lettersDatabase.filter(item => 
-                item.nama.toLowerCase().includes(keyword) || item.nip.toLowerCase().includes(keyword)
+                String(item.nama || '').toLowerCase().includes(keyword) ||
+                String(item.nip || '').toLowerCase().includes(keyword)
             );
 
             if (filtered.length === 0) {
@@ -1099,21 +1321,21 @@
                     <tr class="hover:bg-slate-50 transition border-b border-gray-100">
                         <td class="py-3 px-4 font-medium text-gray-500">${index + 1}</td>
                         <td class="py-3 px-4">
-                            <div class="font-bold text-gray-900">${item.nama}</div>
-                            <div class="text-[11px] font-mono text-gray-500">${item.nip}</div>
+                            <div class="font-bold text-gray-900">${escapeHtml(item.nama)}</div>
+                            <div class="text-[11px] font-mono text-gray-500">${escapeHtml(item.nip)}</div>
                         </td>
                         <td class="py-3 px-4">
-                            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full ${item.statusPegawai === 'PNS' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${item.statusPegawai}</span>
-                            <div class="text-xs text-gray-600 mt-1">${item.pangkat}</div>
+                            <span class="px-2 py-0.5 text-[10px] font-bold uppercase rounded-full ${item.statusPegawai === 'PNS' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${escapeHtml(item.statusPegawai)}</span>
+                            <div class="text-xs text-gray-600 mt-1">${escapeHtml(item.pangkat)}</div>
                         </td>
-                        <td class="py-3 px-4 text-xs font-medium text-gray-700">${item.kabkot}</td>
-                        <td class="py-3 px-4 font-bold text-emerald-700">${item.gajiBaru}</td>
+                        <td class="py-3 px-4 text-xs font-medium text-gray-700">${escapeHtml(item.kabkot)}</td>
+                        <td class="py-3 px-4 font-bold text-emerald-700">${escapeHtml(item.gajiBaru)}</td>
                         <td class="py-3 px-4 text-xs text-gray-500">${formatDateIndo(item.suratTanggal)}</td>
                         <td class="py-3 px-4 text-center space-x-1 whitespace-nowrap">
-                            <button onclick="openPrintModalById('${item.id}')" class="bg-blue-50 hover:bg-blue-600 hover:text-white text-blue-600 p-2 rounded-lg transition" title="Cetak Surat">
+                            <button onclick="openPrintModalById('${escapeJsString(item.id)}')" class="bg-blue-50 hover:bg-blue-600 hover:text-white text-blue-600 p-2 rounded-lg transition" title="Pratinjau Surat">
                                 <i class="fas fa-print"></i>
                             </button>
-                            <button onclick="deleteHistoryItem('${item.id}')" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus Arsip Lokal">
+                            <button onclick="deleteHistoryItem('${escapeJsString(item.id)}', this)" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus dari Database_Surat">
                                 <i class="fas fa-trash-can"></i>
                             </button>
                         </td>
@@ -1127,11 +1349,63 @@
             if (item) openPrintModal(item);
         }
 
-        function deleteHistoryItem(id) {
-            lettersDatabase = lettersDatabase.filter(d => d.id !== id);
-            renderHistoryTable();
-            updateDashboardStats();
-            renderReport();
+        function deleteHistoryItem(id, button) {
+            const item = lettersDatabase.find(data => data.id === id);
+            if (!item) {
+                showToast('Data Tidak Ditemukan', 'Arsip surat tidak tersedia atau sudah dihapus.', false);
+                return;
+            }
+
+            const confirmed = window.confirm(
+                `Hapus surat ${item.suratNomor || item.id} atas nama ${item.nama || '-'} dari Database_Surat?\n\nData yang telah dihapus tidak dapat dikembalikan.`
+            );
+            if (!confirmed) return;
+
+            if (typeof google === 'undefined' || !google.script || !google.script.run) {
+                showToast('Hapus Gagal', 'Layanan Google Apps Script tidak tersedia.', false);
+                return;
+            }
+
+            const originalButtonHtml = button ? button.innerHTML : '';
+            if (button) {
+                button.disabled = true;
+                button.classList.add('opacity-60', 'cursor-not-allowed');
+                button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+            }
+
+            google.script.run
+                .withSuccessHandler(result => {
+                    if (!result || result.status !== 'success') {
+                        const message = result && result.errorMsg
+                            ? result.errorMsg
+                            : 'Data surat gagal dihapus.';
+                        showToast('Hapus Gagal', message, false);
+                        if (button) {
+                            button.disabled = false;
+                            button.classList.remove('opacity-60', 'cursor-not-allowed');
+                            button.innerHTML = originalButtonHtml;
+                        }
+                        return;
+                    }
+
+                    lettersDatabase = lettersDatabase.filter(data => data.id !== id);
+                    renderHistoryTable();
+                    updateDashboardStats();
+                    renderReport();
+                    showToast('Arsip Berhasil Dihapus', 'Data surat telah dihapus dari Database_Surat.', true);
+                })
+                .withFailureHandler(error => {
+                    const message = error && error.message
+                        ? error.message
+                        : String(error || 'Data surat gagal dihapus.');
+                    showToast('Hapus Gagal', message, false);
+                    if (button) {
+                        button.disabled = false;
+                        button.classList.remove('opacity-60', 'cursor-not-allowed');
+                        button.innerHTML = originalButtonHtml;
+                    }
+                })
+                .getArsipSurat({ action: 'delete', id: id });
         }
 
         function renderReport() {

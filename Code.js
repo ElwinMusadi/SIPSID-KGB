@@ -128,6 +128,119 @@ function normalizeNominalGaji_(rawValue, displayValue) {
   return digitsOnly || null;
 }
 
+function getArsipSurat(request) {
+  if (request && request.action === "delete") {
+    return deleteArsipSurat_(request.id);
+  }
+
+  var result = {
+    status: "success",
+    data: [],
+    errorMsg: ""
+  };
+
+  try {
+    var ss = SpreadsheetApp.openById("1ZwZRVDmgYivLL5NpcwA0OixR2iN6yioQs38J4ftEAvY");
+    var sheet = ss.getSheetByName("Database_Surat");
+    if (!sheet) {
+      throw new Error("Sheet Database_Surat tidak ditemukan.");
+    }
+
+    var rows = sheet.getDataRange().getDisplayValues();
+    for (var i = rows.length - 1; i >= 1; i--) {
+      var row = rows[i];
+      if (!String(row[1] || "").trim()) continue;
+
+      result.data.push({
+        id: String(row[1] || "").trim(),
+        statusPegawai: String(row[2] || "").trim(),
+        nama: String(row[3] || "").trim(),
+        nip: String(row[4] || "").trim(),
+        pangkat: String(row[5] || "").trim(),
+        jabatan: String(row[6] || "").trim(),
+        unit: String(row[7] || "").trim(),
+        kabkot: String(row[8] || "").trim(),
+        skPejabat: String(row[9] || "").trim(),
+        skTanggal: normalizeDateForClient_(row[10]),
+        skNomor: String(row[11] || "").trim(),
+        skTmt: normalizeDateForClient_(row[12]),
+        mkLamaThn: String(row[13] || "0").trim(),
+        mkLamaBln: String(row[14] || "0").trim(),
+        gajiLama: String(row[15] || "").trim(),
+        mkBaruThn: String(row[16] || "0").trim(),
+        mkBaruBln: String(row[17] || "0").trim(),
+        gajiBaruTmt: normalizeDateForClient_(row[18]),
+        gajiBaru: String(row[19] || "").trim(),
+        suratNomor: String(row[20] || "").trim(),
+        suratTanggal: normalizeDateForClient_(row[21]),
+        signJabatan: String(row[22] || "").trim(),
+        signNama: String(row[23] || "").trim(),
+        signPangkat: String(row[24] || "").trim(),
+        signNip: String(row[25] || "").trim(),
+        ukuranKertas: String(row[26] || "legal").trim().toLowerCase() || "legal"
+      });
+    }
+  } catch (error) {
+    result.status = "error";
+    result.errorMsg = error.toString();
+  }
+
+  return result;
+}
+
+function deleteArsipSurat_(id) {
+  var recordId = String(id || "").trim();
+  if (!recordId) {
+    return { status: "error", errorMsg: "ID surat tidak valid." };
+  }
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    var ss = SpreadsheetApp.openById("1ZwZRVDmgYivLL5NpcwA0OixR2iN6yioQs38J4ftEAvY");
+    var sheet = ss.getSheetByName("Database_Surat");
+    if (!sheet) {
+      throw new Error("Sheet Database_Surat tidak ditemukan.");
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return { status: "not_found", errorMsg: "Data surat tidak ditemukan." };
+    }
+
+    var ids = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+    for (var i = ids.length - 1; i >= 0; i--) {
+      if (String(ids[i][0] || "").trim() === recordId) {
+        sheet.deleteRow(i + 2);
+        SpreadsheetApp.flush();
+        return { status: "success", id: recordId };
+      }
+    }
+
+    return { status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
+  } catch (error) {
+    return { status: "error", errorMsg: error.toString() };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function normalizeDateForClient_(value) {
+  var text = String(value || "").trim();
+  if (!text) return "";
+
+  var isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return isoMatch[1] + "-" + isoMatch[2] + "-" + isoMatch[3];
+
+  var localMatch = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/);
+  if (localMatch) {
+    return localMatch[3] + "-" + String(localMatch[2]).padStart(2, "0") + "-" + String(localMatch[1]).padStart(2, "0");
+  }
+
+  return text;
+}
+
 function doPost(e) {
   try {
     var ss = SpreadsheetApp.openById("1ZwZRVDmgYivLL5NpcwA0OixR2iN6yioQs38J4ftEAvY");
@@ -161,9 +274,10 @@ function doPost(e) {
       data.suratNomor,        // Kolom U: Nomor Surat KGB
       data.suratTanggal,      // Kolom V: Tanggal Pembuatan Surat
       data.signJabatan,       // Kolom W: Jabatan Penandatangan
-      data.signNama,          // Kolom X: Nama Penandatangan
-      data.signPangkat,       // Kolom Y: Pangkat Penandatangan
-      data.signNip            // Kolom Z: NIP Penandatangan
+      data.signNama,            // Kolom X: Nama Penandatangan
+      data.signPangkat,         // Kolom Y: Pangkat Penandatangan
+      data.signNip,             // Kolom Z: NIP Penandatangan
+      data.ukuranKertas || "legal" // Kolom AA: Ukuran Kertas
     ]);
     
     return ContentService.createTextOutput(JSON.stringify({"status": "success"}))
