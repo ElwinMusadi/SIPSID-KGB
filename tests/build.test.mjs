@@ -29,3 +29,15 @@ test("source frontend tidak menyimpan credential pengguna", async () => {
   assert.equal(html.includes('password: "123456789"'), false);
   assert.equal(html.includes("mode: 'no-cors'"), false);
 });
+
+test("template surat memuat placeholder barcode SRIKANDI secara literal", async () => {
+  const html = await readFile(resolve(root, "Index.html"), "utf8");
+  assert.match(html, /\\\$\{ttd_pengirim\}/);
+
+  await execFileAsync(process.execPath, ["scripts/build-pages.mjs"], { cwd: root });
+  await execFileAsync(process.execPath, ["scripts/build-gas.mjs"], { cwd: root });
+  const pages = await readFile(resolve(root, "dist", "index.html"), "utf8");
+  const gas = await readFile(resolve(root, "gas", "Index.html"), "utf8");
+  assert.match(pages, /\\\$\{ttd_pengirim\}/);
+  assert.match(gas, /\\\$\{ttd_pengirim\}/);
+});

@@ -102,13 +102,31 @@ Build output: dist
 Production branch: main
 ```
 
-Atur environment variables untuk Preview dan Production:
+Atur environment variables untuk Preview dan Production. Variables harus tersedia saat **runtime Pages Functions**, bukan hanya saat build:
 
 | Variable | Keterangan |
 |---|---|
 | `GAS_WEB_APP_URL` | URL `/exec` deployment GAS target |
 | `CLOUDFLARE_API_SECRET` | Sama dengan Script Property GAS |
 | `ALLOWED_ORIGIN` | Origin Pages, misalnya `https://sipsid-kgb.pages.dev` |
+
+Melalui dashboard: **Workers & Pages → sipsid-kgb → Settings → Variables and Secrets**. Setelah menambah atau mengubah variable, buat deployment baru.
+
+Alternatif CLI untuk production:
+
+```powershell
+"https://script.google.com/macros/s/DEPLOYMENT_ID/exec" | npx wrangler pages secret put GAS_WEB_APP_URL --project-name sipsid-kgb
+"SHARED_SECRET_YANG_SAMA_DENGAN_GAS" | npx wrangler pages secret put CLOUDFLARE_API_SECRET --project-name sipsid-kgb
+"https://sipsid-kgb.pages.dev" | npx wrangler pages secret put ALLOWED_ORIGIN --project-name sipsid-kgb
+npm run build:pages
+npx wrangler pages deploy dist --project-name sipsid-kgb --branch main
+```
+
+Verifikasi runtime binding:
+
+```powershell
+npx wrangler pages secret list --project-name sipsid-kgb
+```
 
 Untuk local preview:
 
