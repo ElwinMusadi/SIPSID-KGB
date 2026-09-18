@@ -1738,9 +1738,9 @@
                           <p style="margin: 0; line-height: 1.2;">Provinsi Nusa Tenggara Timur,</p>
 
                           <!-- Placeholder tanda tangan elektronik untuk penempatan barcode SRIKANDI -->
-                          <div style="height: 125px; display: flex; align-items: center; justify-content: center; transform: translateX(-90px);">
-                              <p style="margin: 0; line-height: 1.2;">\${ttd_pengirim}</p>
-                          </div>
+                           <div style="height: 125px; display: flex; align-items: center; justify-content: center; transform: translateX(-90px);">
+                               <p id="srikandi-signature-marker" style="margin: 0; line-height: 1.2; font-family: Arial, sans-serif; font-size: 10pt; color: #000000; white-space: nowrap;">\${ttd_pengirim}</p>
+                           </div>
 
                           <!-- Nama Kadis tanpa garis bawah dan ditebalkan -->
                           <p style="margin: 0; font-weight: bold; line-height: 1.2;">${data.signNama}</p>
@@ -1786,6 +1786,9 @@
           }));
       }
 
+      const SRIKANDI_SIGNATURE_MARKER = '${ttd_pengirim}';
+      const SRIKANDI_MARKER_ELEMENT_ID = 'srikandi-signature-marker';
+
       function buildLetterPdfFileName(data) {
           const safePart = value => String(value || '')
               .trim()
@@ -1794,6 +1797,64 @@
           const nip = safePart(data && data.nip) || 'Tanpa-NIP';
           const tanggal = safePart(data && data.suratTanggal) || new Date().toISOString().slice(0, 10);
           return `Surat-KGB-${nip}-${tanggal}.pdf`;
+      }
+
+      function getSrikandiMarkerMetrics(sheet) {
+          const marker = sheet.querySelector(`#${SRIKANDI_MARKER_ELEMENT_ID}`);
+          if (!marker || marker.textContent.trim() !== SRIKANDI_SIGNATURE_MARKER) {
+              throw new Error('Placeholder tanda tangan SRIKANDI tidak ditemukan atau tidak valid.');
+          }
+
+          const sheetRect = sheet.getBoundingClientRect();
+          const markerRect = marker.getBoundingClientRect();
+          const relativeLeft = markerRect.left - sheetRect.left;
+          const relativeTop = markerRect.top - sheetRect.top;
+
+          if (
+              sheetRect.width <= 0 || sheetRect.height <= 0 ||
+              markerRect.width <= 0 || markerRect.height <= 0 ||
+              relativeLeft < 0 || relativeTop < 0 ||
+              relativeLeft + markerRect.width > sheetRect.width + 1 ||
+              relativeTop + markerRect.height > sheetRect.height + 1
+          ) {
+              throw new Error('Koordinat placeholder tanda tangan SRIKANDI tidak valid.');
+          }
+
+          return {
+              sheetWidth: sheetRect.width,
+              centerX: relativeLeft + (markerRect.width / 2),
+              topY: relativeTop,
+              bottomY: relativeTop + markerRect.height,
+              baselineY: relativeTop + (markerRect.height * 0.8)
+          };
+      }
+
+      function addSrikandiMarkerTextLayer(pdf, metrics, pageWidth, pageHeight, renderedDocumentHeight) {
+          const scaleToPdf = pageWidth / metrics.sheetWidth;
+          const absoluteX = metrics.centerX * scaleToPdf;
+          const absoluteTopY = metrics.topY * scaleToPdf;
+          const absoluteBottomY = metrics.bottomY * scaleToPdf;
+          const absoluteY = metrics.baselineY * scaleToPdf;
+          const pageIndex = Math.floor(absoluteY / pageHeight);
+          const localY = absoluteY - (pageIndex * pageHeight);
+          const pageCount = pdf.getNumberOfPages();
+          const crossesPageBoundary = Math.floor(absoluteTopY / pageHeight) !== Math.floor(absoluteBottomY / pageHeight);
+
+          if (
+              !Number.isFinite(absoluteX) || !Number.isFinite(localY) ||
+              pageIndex < 0 || pageIndex >= pageCount || crossesPageBoundary ||
+              absoluteX <= 0 || absoluteX >= pageWidth ||
+              localY <= 0 || localY >= pageHeight ||
+              absoluteY > renderedDocumentHeight + 1
+          ) {
+              throw new Error('Posisi placeholder SRIKANDI berada di luar halaman PDF.');
+          }
+
+          pdf.setPage(pageIndex + 1);
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(10);
+          pdf.setTextColor(0, 0, 0);
+          pdf.text(SRIKANDI_SIGNATURE_MARKER, absoluteX, localY, { align: 'center' });
       }
 
       async function downloadLetterPdf() {
@@ -1819,6 +1880,7 @@
               }
 
               await waitForLetterImages(sheet);
+              const markerMetrics = getSrikandiMarkerMetrics(sheet);
 
               const canvas = await html2canvas(sheet, {
                   scale: 2,
@@ -1827,7 +1889,11 @@
                   backgroundColor: '#ffffff',
                   logging: false,
                   scrollX: 0,
-                  scrollY: -window.scrollY
+                  scrollY: -window.scrollY,
+                  onclone: clonedDocument => {
+                      const clonedMarker = clonedDocument.getElementById(SRIKANDI_MARKER_ELEMENT_ID);
+                      if (clonedMarker) clonedMarker.style.setProperty('visibility', 'hidden', 'important');
+                  }
               });
 
               const ukuranKertas = activeLetterData.ukuranKertas === 'a4' ? 'a4' : 'legal';
@@ -1898,11 +1964,19 @@
                   }
               }
 
+              addSrikandiMarkerTextLayer(
+                  pdf,
+                  markerMetrics,
+                  pageWidth,
+                  pageHeight,
+                  imageHeight
+              );
+
               pdf.save(buildLetterPdfFileName(activeLetterData));
-              showToast('PDF Berhasil Diunduh', 'Surat KGB telah diunduh ke perangkat Anda.', true);
+              showToast('PDF Berhasil Diunduh', 'Surat KGB telah diunduh dengan placeholder SRIKANDI yang dapat dibaca sistem.', true);
           } catch (error) {
               console.error('Gagal membuat PDF Surat KGB:', error);
-              showToast('PDF Gagal Dibuat', 'Terjadi kendala saat menyiapkan PDF. Periksa koneksi dan coba kembali.', false);
+              showToast('PDF Gagal Dibuat', error?.message || 'Terjadi kendala saat menyiapkan PDF. Periksa koneksi dan coba kembali.', false);
           } finally {
               if (button) {
                   button.disabled = false;
