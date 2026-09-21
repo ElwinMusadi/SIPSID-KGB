@@ -53,4 +53,26 @@ test("download PDF menyembunyikan marker raster dan menambah text layer native",
   assert.match(html, /pdf\.text\(SRIKANDI_SIGNATURE_MARKER, absoluteX, localY, \{ align: 'center' \}\)/);
   assert.match(html, /crossesPageBoundary/);
   assert.match(html, /getSrikandiMarkerMetrics\(sheet\)/);
+  assert.match(html, /createPdfFromCanvas\(canvas, ukuranKertas\)/);
+});
+
+test("laporan rekapitulasi diunduh sebagai PDF menggunakan generator bersama", async () => {
+  const html = await readFile(resolve(root, "Index.html"), "utf8");
+  assert.doesNotMatch(html, /onclick="window\.print\(\)"/);
+  assert.match(html, /id="btn-download-report-pdf"/);
+  assert.match(html, /onclick="downloadReportPdf\(\)"/);
+  assert.match(html, /async function downloadReportPdf\(\)/);
+  assert.match(html, /renderElementToCanvas\(sheet\)/);
+  assert.match(html, /createPdfFromCanvas\(canvas, 'legal'\)/);
+  assert.match(html, /buildReportPdfFileName\(activeReportContext\)/);
+
+  await execFileAsync(process.execPath, ["scripts/build-pages.mjs"], { cwd: root });
+  await execFileAsync(process.execPath, ["scripts/build-gas.mjs"], { cwd: root });
+  const pages = await readFile(resolve(root, "dist", "index.html"), "utf8");
+  const gas = await readFile(resolve(root, "gas", "Index.html"), "utf8");
+  for (const artifact of [pages, gas]) {
+    assert.doesNotMatch(artifact, /onclick="window\.print\(\)"/);
+    assert.match(artifact, /async function downloadReportPdf\(\)/);
+    assert.match(artifact, /id="btn-download-report-pdf"/);
+  }
 });

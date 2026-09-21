@@ -1151,7 +1151,7 @@
       </div>
     </div>
 
-    <!-- MODAL: PRATINJAU / CETAK LAPORAN REKAPITULASI -->
+    <!-- MODAL: PRATINJAU / DOWNLOAD PDF LAPORAN REKAPITULASI -->
     <div
       id="report-print-container"
       class="hidden fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6 overflow-y-auto"
@@ -1167,17 +1167,18 @@
               <i class="fas fa-print"></i>
             </div>
             <h3 class="font-bold text-sm sm:text-base">
-              Cetak Laporan Rekapitulasi KGB
+              Pratinjau Laporan Rekapitulasi KGB
             </h3>
           </div>
           <div class="flex items-center space-x-3">
             <button
-              onclick="window.print()"
+              onclick="downloadReportPdf()"
+              id="btn-download-report-pdf"
               class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition flex items-center space-x-2 shadow-lg"
             >
-              <i class="fas fa-print"></i
-              ><span class="hidden sm:inline">Cetak Dokumen</span
-              ><span class="sm:hidden">Cetak</span>
+              <i class="fas fa-download"></i
+              ><span class="hidden sm:inline">Download PDF</span
+              ><span class="sm:hidden">Download</span>
             </button>
             <button
               onclick="closeReportPrintModal()"
@@ -1281,6 +1282,7 @@
       let arsipSuratLoaded = false;
       let arsipSuratLoading = false;
       let activeLetterData = null;
+      let activeReportContext = null;
 
       // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
       const kopSuratHTML = `
@@ -1775,8 +1777,8 @@
           navigate('list');
       }
 
-      function waitForLetterImages(sheet) {
-          const images = Array.from(sheet.querySelectorAll('img'));
+      function waitForDocumentImages(element) {
+          const images = Array.from(element.querySelectorAll('img'));
           return Promise.all(images.map(image => {
               if (image.complete) return Promise.resolve();
               return new Promise(resolve => {
@@ -1784,6 +1786,94 @@
                   image.addEventListener('error', resolve, { once: true });
               });
           }));
+      }
+
+      function validatePdfLibraries() {
+          if (typeof html2canvas !== 'function' || !window.jspdf || !window.jspdf.jsPDF) {
+              throw new Error('Library pembuat PDF tidak berhasil dimuat. Muat ulang halaman lalu coba kembali.');
+          }
+      }
+
+      async function renderElementToCanvas(element, options = {}) {
+          await waitForDocumentImages(element);
+          return html2canvas(element, {
+              scale: 2,
+              useCORS: true,
+              allowTaint: false,
+              backgroundColor: '#ffffff',
+              logging: false,
+              scrollX: 0,
+              scrollY: -window.scrollY,
+              ...options
+          });
+      }
+
+      function createPdfFromCanvas(canvas, format = 'legal') {
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({
+              orientation: 'portrait',
+              unit: 'mm',
+              format: format,
+              compress: true
+          });
+          const pageWidth = pdf.internal.pageSize.getWidth();
+          const pageHeight = pdf.internal.pageSize.getHeight();
+          const imageHeight = (canvas.height * pageWidth) / canvas.width;
+          const fitsSinglePage = imageHeight <= pageHeight + 1;
+
+          if (fitsSinglePage) {
+              pdf.addImage(
+                  canvas.toDataURL('image/jpeg', 0.95),
+                  'JPEG',
+                  0,
+                  0,
+                  pageWidth,
+                  Math.min(imageHeight, pageHeight),
+                  undefined,
+                  'FAST'
+              );
+          } else {
+              const renderedPageHeight = Math.round((canvas.width * pageHeight) / pageWidth);
+              const pageCount = Math.ceil(canvas.height / renderedPageHeight);
+
+              for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
+                  const sourceOffsetY = pageNumber * renderedPageHeight;
+                  const sourceHeight = Math.min(renderedPageHeight, canvas.height - sourceOffsetY);
+                  const pageCanvas = document.createElement('canvas');
+                  pageCanvas.width = canvas.width;
+                  pageCanvas.height = renderedPageHeight;
+
+                  const pageContext = pageCanvas.getContext('2d');
+                  if (!pageContext) throw new Error('Canvas halaman PDF tidak dapat dibuat.');
+                  pageContext.fillStyle = '#ffffff';
+                  pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+                  pageContext.drawImage(
+                      canvas,
+                      0,
+                      sourceOffsetY,
+                      canvas.width,
+                      sourceHeight,
+                      0,
+                      0,
+                      pageCanvas.width,
+                      sourceHeight
+                  );
+
+                  if (pageNumber > 0) pdf.addPage(format, 'portrait');
+                  pdf.addImage(
+                      pageCanvas.toDataURL('image/jpeg', 0.95),
+                      'JPEG',
+                      0,
+                      0,
+                      pageWidth,
+                      pageHeight,
+                      undefined,
+                      'FAST'
+                  );
+              }
+          }
+
+          return { pdf, pageWidth, pageHeight, imageHeight };
       }
 
       const SRIKANDI_SIGNATURE_MARKER = '${ttd_pengirim}';
@@ -1867,29 +1957,16 @@
               return;
           }
 
-          if (typeof html2canvas !== 'function' || !window.jspdf || !window.jspdf.jsPDF) {
-              showToast('PDF Gagal Dibuat', 'Library pembuat PDF tidak berhasil dimuat. Muat ulang halaman lalu coba kembali.', false);
-              return;
-          }
-
           try {
+              validatePdfLibraries();
               if (button) {
                   button.disabled = true;
                   button.classList.add('opacity-75', 'cursor-not-allowed');
                   button.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Menyiapkan PDF...</span>';
               }
 
-              await waitForLetterImages(sheet);
               const markerMetrics = getSrikandiMarkerMetrics(sheet);
-
-              const canvas = await html2canvas(sheet, {
-                  scale: 2,
-                  useCORS: true,
-                  allowTaint: false,
-                  backgroundColor: '#ffffff',
-                  logging: false,
-                  scrollX: 0,
-                  scrollY: -window.scrollY,
+              const canvas = await renderElementToCanvas(sheet, {
                   onclone: clonedDocument => {
                       const clonedMarker = clonedDocument.getElementById(SRIKANDI_MARKER_ELEMENT_ID);
                       if (clonedMarker) clonedMarker.style.setProperty('visibility', 'hidden', 'important');
@@ -1897,72 +1974,7 @@
               });
 
               const ukuranKertas = activeLetterData.ukuranKertas === 'a4' ? 'a4' : 'legal';
-              const { jsPDF } = window.jspdf;
-              const pdf = new jsPDF({
-                  orientation: 'portrait',
-                  unit: 'mm',
-                  format: ukuranKertas,
-                  compress: true
-              });
-
-              const pageWidth = pdf.internal.pageSize.getWidth();
-              const pageHeight = pdf.internal.pageSize.getHeight();
-              const imageHeight = (canvas.height * pageWidth) / canvas.width;
-              const fitsSinglePage = imageHeight <= pageHeight + 1;
-
-              if (fitsSinglePage) {
-                  pdf.addImage(
-                      canvas.toDataURL('image/jpeg', 0.95),
-                      'JPEG',
-                      0,
-                      0,
-                      pageWidth,
-                      Math.min(imageHeight, pageHeight),
-                      undefined,
-                      'FAST'
-                  );
-              } else {
-                  const renderedPageHeight = Math.round((canvas.width * pageHeight) / pageWidth);
-                  const pageCount = Math.ceil(canvas.height / renderedPageHeight);
-
-                  for (let pageNumber = 0; pageNumber < pageCount; pageNumber++) {
-                      const sourceOffsetY = pageNumber * renderedPageHeight;
-                      const sourceHeight = Math.min(renderedPageHeight, canvas.height - sourceOffsetY);
-                      const pageCanvas = document.createElement('canvas');
-                      pageCanvas.width = canvas.width;
-                      pageCanvas.height = renderedPageHeight;
-
-                      const pageContext = pageCanvas.getContext('2d');
-                      pageContext.fillStyle = '#ffffff';
-                      pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
-                      pageContext.drawImage(
-                          canvas,
-                          0,
-                          sourceOffsetY,
-                          canvas.width,
-                          sourceHeight,
-                          0,
-                          0,
-                          pageCanvas.width,
-                          sourceHeight
-                      );
-
-                      if (pageNumber > 0) {
-                          pdf.addPage(ukuranKertas, 'portrait');
-                      }
-
-                      pdf.addImage(
-                          pageCanvas.toDataURL('image/jpeg', 0.95),
-                          'JPEG',
-                          0,
-                          0,
-                          pageWidth,
-                          pageHeight,
-                          undefined,
-                          'FAST'
-                      );
-                  }
-              }
+              const { pdf, pageWidth, pageHeight, imageHeight } = createPdfFromCanvas(canvas, ukuranKertas);
 
               addSrikandiMarkerTextLayer(
                   pdf,
@@ -2229,8 +2241,18 @@
 
           const titleKab = kabFilter !== "" ? kabFilter : "Seluruh Wilayah Provinsi NTT";
           const titlePeriode = monthFilter !== "" ? `Bulan: ${monthFilter}` : "Semua Periode";
-          const todayStr = formatDateIndo(new Date().toISOString().split('T')[0]);
+          const generatedDate = new Date().toISOString().split('T')[0];
+          const todayStr = formatDateIndo(generatedDate);
           const sheet = document.getElementById('printable-report-sheet');
+
+          activeReportContext = {
+              kabkot: kabFilter,
+              month: monthFilter,
+              titleKab: titleKab,
+              titlePeriode: titlePeriode,
+              generatedDate: generatedDate,
+              total: filtered.length
+          };
 
           let rowsHtml = "";
           filtered.forEach((item, index) => {
@@ -2278,9 +2300,59 @@
           document.getElementById('report-print-container').classList.remove('hidden');
       }
 
+      function buildReportPdfFileName(context) {
+          const safePart = value => String(value || '')
+              .trim()
+              .replace(/[^a-zA-Z0-9_-]+/g, '-')
+              .replace(/^-+|-+$/g, '');
+          const wilayah = safePart(context && context.titleKab) || 'Seluruh-NTT';
+          const periode = safePart(context && context.month) || 'Semua-Periode';
+          const tanggal = safePart(context && context.generatedDate) || new Date().toISOString().slice(0, 10);
+          return `Laporan-Rekapitulasi-KGB-${wilayah}-${periode}-${tanggal}.pdf`;
+      }
+
+      async function downloadReportPdf() {
+          const sheet = document.getElementById('printable-report-sheet');
+          const button = document.getElementById('btn-download-report-pdf');
+          const originalButtonHtml = button ? button.innerHTML : '';
+
+          if (!sheet || !sheet.innerHTML.trim() || !activeReportContext) {
+              showToast('PDF Gagal Dibuat', 'Pratinjau laporan belum tersedia.', false);
+              return;
+          }
+          if (activeReportContext.total === 0) {
+              showToast('PDF Gagal Dibuat', 'Tidak ada data laporan untuk diunduh.', false);
+              return;
+          }
+
+          try {
+              validatePdfLibraries();
+              if (button) {
+                  button.disabled = true;
+                  button.classList.add('opacity-75', 'cursor-not-allowed');
+                  button.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Menyiapkan PDF...</span>';
+              }
+
+              const canvas = await renderElementToCanvas(sheet);
+              const { pdf } = createPdfFromCanvas(canvas, 'legal');
+              pdf.save(buildReportPdfFileName(activeReportContext));
+              showToast('PDF Berhasil Diunduh', 'Laporan rekapitulasi KGB telah diunduh ke perangkat Anda.', true);
+          } catch (error) {
+              console.error('Gagal membuat PDF Laporan Rekapitulasi:', error);
+              showToast('PDF Gagal Dibuat', error?.message || 'Terjadi kendala saat menyiapkan PDF laporan.', false);
+          } finally {
+              if (button) {
+                  button.disabled = false;
+                  button.classList.remove('opacity-75', 'cursor-not-allowed');
+                  button.innerHTML = originalButtonHtml;
+              }
+          }
+      }
+
       function closeReportPrintModal() {
           document.getElementById('report-print-container').classList.add('hidden');
           document.body.classList.remove('print-legal', 'print-a4');
+          activeReportContext = null;
       }
 
       function exportToCSV() {
