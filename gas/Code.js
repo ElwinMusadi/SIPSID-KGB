@@ -76,6 +76,11 @@ function apiDeleteLetter(sessionToken, id) {
   return deleteLetter_(id, session);
 }
 
+function apiUpdateLetter(sessionToken, id, payload) {
+  var session = requireSession_(sessionToken);
+  return updateLetter_(id, payload || {}, session);
+}
+
 // Compatibility wrappers for deployments that still call the old functions.
 function getMasterGaji() {
   return readMasterGaji_();
@@ -98,6 +103,7 @@ function dispatchHttpAction_(request) {
   if (action === "bootstrap.get") return getBootstrapData_();
   if (action === "letters.list") return apiListLetters(request.sessionToken);
   if (action === "letters.create") return apiCreateLetter(request.sessionToken, payload);
+  if (action === "letters.update") return apiUpdateLetter(request.sessionToken, payload.id, payload);
   if (action === "letters.delete") return apiDeleteLetter(request.sessionToken, payload.id);
 
   throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal.");
@@ -287,6 +293,55 @@ function deleteLetter_(id, session) {
         console.info("Letter deleted", JSON.stringify({ id: recordId, actor: session.username }));
         return { status: "success", id: recordId };
       }
+    }
+    return { status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function updateLetter_(id, payload, session) {
+  var recordId = cleanText_(id, 100);
+  if (!recordId) throw appError_("VALIDATION_ERROR", "ID surat tidak valid.");
+
+  // Strip any id the payload may carry so caller cannot change the record ID.
+  var safePayload = {};
+  for (var k in payload) {
+    if (Object.prototype.hasOwnProperty.call(payload, k)) safePayload[k] = payload[k];
+  }
+  delete safePayload.id;
+
+  var letter = validateAndNormalizeLetter_(safePayload);
+  // Ensure id field in normalized result is always the URL id, not payload id.
+  letter.id = recordId;
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
+    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
+    validateLetterSheet_(sheet);
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { status: "not_found", errorMsg: "Data surat tidak ditemukan." };
+
+    var ids = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0] || "").trim() !== recordId) continue;
+
+      var sheetRow = i + 2;
+      // Build mutable columns: LETTER_FIELDS_ skipping index 0 (id).
+      // Sheet layout: col A = timestamp, col B = id, col C onwards = rest of LETTER_FIELDS_.
+      var mutablValues = [];
+      for (var j = 1; j < LETTER_FIELDS_.length; j++) {
+        mutablValues.push(safeSheetValue_(letter[LETTER_FIELDS_[j]]));
+      }
+      // Write from col C (column 3) to cover all mutable fields.
+      sheet.getRange(sheetRow, 3, 1, mutablValues.length).setValues([mutablValues]);
+      SpreadsheetApp.flush();
+
+      console.info("Letter updated", JSON.stringify({ id: recordId, actor: session.username }));
+      return { status: "success", data: letter };
     }
     return { status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
   } finally {

@@ -27,6 +27,18 @@ export function mapRoute(method, pathname) {
     }
   }
 
+  if (method.toUpperCase() === "PUT") {
+    const match = pathname.match(/^\/api\/letters\/([^/]+)$/);
+    if (match) {
+      try {
+        const id = decodeURIComponent(match[1]).trim();
+        if (id) return { action: "letters.update", body: true, mutation: true, urlId: id };
+      } catch {
+        return null;
+      }
+    }
+  }
+
   return null;
 }
 
@@ -139,11 +151,14 @@ export function normalizeGasResponse(value) {
 
   const failed = value.ok === false || (typeof value.status === "string" && value.status.toLowerCase() !== "success");
   if (failed) {
-    const code = typeof value.error?.code === "string"
+    const rawCode = typeof value.error?.code === "string"
       ? value.error.code
       : typeof value.errorCode === "string"
         ? value.errorCode
-        : "request_failed";
+        : typeof value.status === "string" && value.status.toLowerCase() === "not_found"
+          ? "not_found"
+          : "request_failed";
+    const code = rawCode.toLowerCase();
     const message = typeof value.error?.message === "string"
       ? value.error.message
       : typeof value.errorMsg === "string"
@@ -205,6 +220,11 @@ export async function handleRequest(context, fetchImpl = fetch) {
     const parsed = await readJsonPayload(request);
     if (parsed.error) return parsed.error;
     payload = parsed.payload;
+  }
+  // For routes with a URL segment id (e.g. PUT /api/letters/:id), merge the URL
+  // id into the payload and ensure it always wins over any id in the body.
+  if (route.urlId) {
+    payload = { ...payload, id: route.urlId };
   }
 
   const sessionToken = parseCookies(request.headers.get("Cookie"))[SESSION_COOKIE] || "";

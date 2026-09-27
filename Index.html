@@ -456,16 +456,17 @@
               class="border-b border-gray-200 pb-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
             >
               <div>
-                <h2 class="text-xl font-bold text-gray-800">
+                <h2 id="form-title" class="text-xl font-bold text-gray-800">
                   Formulir Pembuatan Surat Kenaikan Gaji Berkala (KGB)
                 </h2>
-                <p class="text-xs text-gray-500 mt-1">
+                <p id="form-description" class="text-xs text-gray-500 mt-1">
                   Lengkapi data pegawai dan rincian gaji sesuai peraturan
                   perundang-undangan yang berlaku.
                 </p>
               </div>
               <button
                 onclick="resetForm()"
+                id="btn-reset-form"
                 class="text-xs text-red-600 bg-red-50 px-4 py-2 rounded-lg hover:bg-red-100 font-bold transition flex items-center w-fit"
               >
                 <i class="fas fa-rotate-right mr-1.5"></i> Kosongkan Form
@@ -1270,6 +1271,10 @@
               if (isGasRuntime()) return runGas('apiCreateLetter', sessionStorage.getItem('sipsid_session') || '', payload);
               return { status: 'success', data: await fetchJson('/api/letters', { method: 'POST', body: JSON.stringify(payload) }) };
           },
+          async updateLetter(id, payload) {
+              if (isGasRuntime()) return runGas('apiUpdateLetter', sessionStorage.getItem('sipsid_session') || '', id, payload);
+              return { status: 'success', data: await fetchJson(`/api/letters/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }) };
+          },
           async deleteLetter(id) {
               if (isGasRuntime()) return runGas('apiDeleteLetter', sessionStorage.getItem('sipsid_session') || '', id);
               const data = await fetchJson(`/api/letters/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}' });
@@ -1283,6 +1288,7 @@
       let arsipSuratLoading = false;
       let activeLetterData = null;
       let activeReportContext = null;
+      let editingLetterId = null;
 
       // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
       const kopSuratHTML = `
@@ -1434,7 +1440,7 @@
           } catch (error) {
               masterGajiError = error?.message || String(error || 'Data Master_Gaji_Pangkat gagal dimuat.');
           }
-          calculateSalary();
+          if (!editingLetterId) calculateSalary();
       }
 
       function formatRupiahExact(nominal) {
@@ -1472,7 +1478,9 @@
           setSalaryFromMaster(document.getElementById('gaji-baru'), listData, pangkatVal, mkBaru);
       }
 
-      function navigate(viewId) {
+      function navigate(viewId, preserveEdit = false) {
+          if (viewId === 'create' && editingLetterId && !preserveEdit) resetForm(false);
+
           document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
           document.querySelectorAll('.nav-btn').forEach(el => {
               el.classList.remove('border-blue-600', 'text-blue-600');
@@ -1542,15 +1550,120 @@
           currentUser = null;
           lettersDatabase = [];
           arsipSuratLoaded = false;
+          setEditingMode(null);
           document.getElementById('main-app').classList.add('hidden');
           document.getElementById('login-page').classList.remove('hidden');
       }
 
-      function resetForm() {
+      function setEditingMode(id) {
+          editingLetterId = id || null;
+          const isEditing = Boolean(editingLetterId);
+          const title = document.getElementById('form-title');
+          const description = document.getElementById('form-description');
+          const resetButton = document.getElementById('btn-reset-form');
+          const submitButton = document.getElementById('btn-submit-form');
+
+          if (title) title.innerText = isEditing
+              ? 'Edit Surat Kenaikan Gaji Berkala (KGB)'
+              : 'Formulir Pembuatan Surat Kenaikan Gaji Berkala (KGB)';
+          if (description) description.innerText = isEditing
+              ? 'Perbarui data surat yang dipilih. ID arsip tetap dan tidak dapat diubah.'
+              : 'Lengkapi data pegawai dan rincian gaji sesuai peraturan perundang-undangan yang berlaku.';
+          if (resetButton) resetButton.innerHTML = isEditing
+              ? '<i class="fas fa-xmark mr-1.5"></i> Batalkan Edit'
+              : '<i class="fas fa-rotate-right mr-1.5"></i> Kosongkan Form';
+          if (submitButton) submitButton.innerHTML = isEditing
+              ? '<i class="fas fa-floppy-disk text-lg"></i><span>Perbarui & Pratinjau Surat KGB</span>'
+              : '<i class="fas fa-eye text-lg"></i><span>Simpan & Pratinjau Surat KGB</span>';
+      }
+
+      function resetForm(showNotification = true) {
+          const wasEditing = Boolean(editingLetterId);
+          setEditingMode(null);
           document.getElementById('kgb-form').reset();
           setDefaultDates();
           onStatusPegawaiChange();
-          showToast("Form Dikosongkan", "Formulir siap untuk data baru.", true);
+          if (showNotification) {
+              showToast(
+                  wasEditing ? 'Edit Dibatalkan' : 'Form Dikosongkan',
+                  'Formulir siap untuk data baru.',
+                  true
+              );
+          }
+      }
+
+      function formatDateForInput(value) {
+          const text = String(value || '').trim();
+          const isoDate = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+          if (isoDate) return `${isoDate[1]}-${isoDate[2]}-${isoDate[3]}`;
+
+          const date = new Date(text);
+          if (Number.isNaN(date.getTime())) return '';
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+      }
+
+      function setFormControlValue(id, value, allowUnknownOption = false) {
+          const control = document.getElementById(id);
+          if (!control) return;
+          const normalizedValue = value == null ? '' : String(value);
+          if (allowUnknownOption && control.tagName === 'SELECT' && normalizedValue &&
+              !Array.from(control.options).some(option => option.value === normalizedValue)) {
+              control.add(new Option(normalizedValue, normalizedValue));
+          }
+          control.value = normalizedValue;
+      }
+
+      function editHistoryItem(id) {
+          const item = lettersDatabase.find(letter => String(letter.id) === String(id));
+          if (!item) {
+              showToast('Data Tidak Ditemukan', 'Arsip surat tidak tersedia atau sudah dihapus.', false);
+              return;
+          }
+
+          setEditingMode(item.id);
+          setFormControlValue('pegawai-status', item.statusPegawai, true);
+          onStatusPegawaiChange();
+          setFormControlValue('pegawai-pangkat', item.pangkat, true);
+
+          const fields = {
+              'pegawai-nama': item.nama,
+              'pegawai-nip': item.nip,
+              'pegawai-jabatan': item.jabatan,
+              'pegawai-unit': item.unit,
+              'pegawai-kabkot': item.kabkot,
+              'sk-pejabat': item.skPejabat,
+              'sk-nomor': item.skNomor,
+              'mk-lama-thn': item.mkLamaThn,
+              'mk-lama-bln': item.mkLamaBln,
+              'gaji-lama': item.gajiLama,
+              'mk-baru-thn': item.mkBaruThn,
+              'mk-baru-bln': item.mkBaruBln,
+              'gaji-baru': item.gajiBaru,
+              'surat-nomor': item.suratNomor,
+              'sign-jabatan': item.signJabatan,
+              'sign-nama': item.signNama,
+              'sign-pangkat': item.signPangkat,
+              'sign-nip': item.signNip,
+              'ukuran-kertas': item.ukuranKertas || 'legal'
+          };
+          Object.entries(fields).forEach(([fieldId, value]) => setFormControlValue(
+              fieldId,
+              value,
+              ['pegawai-kabkot', 'sk-pejabat', 'ukuran-kertas'].includes(fieldId)
+          ));
+
+          setFormControlValue('sk-tanggal', formatDateForInput(item.skTanggal));
+          setFormControlValue('sk-tmt', formatDateForInput(item.skTmt));
+          setFormControlValue('gaji-tmt-baru', formatDateForInput(item.gajiBaruTmt));
+          setFormControlValue('surat-tanggal', formatDateForInput(item.suratTanggal));
+          document.getElementById('gaji-lama').setCustomValidity('');
+          document.getElementById('gaji-baru').setCustomValidity('');
+
+          navigate('create', true);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
       }
 
       function submitKgbForm(e) {
@@ -1559,12 +1672,13 @@
           const submitBtn = document.getElementById('btn-submit-form');
           const originalBtnHtml = submitBtn.innerHTML;
 
-          submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin text-lg"></i><span>Menyimpan ke Database...</span>';
+          const letterIdBeingEdited = editingLetterId;
+          const isEditing = Boolean(letterIdBeingEdited);
+          submitBtn.innerHTML = `<i class="fas fa-spinner fa-spin text-lg"></i><span>${isEditing ? 'Memperbarui' : 'Menyimpan'} ke Database...</span>`;
           submitBtn.disabled = true;
           submitBtn.classList.add('opacity-75', 'cursor-not-allowed');
 
           const formData = {
-              id: '',
               statusPegawai: document.getElementById('pegawai-status').value,
               nama: document.getElementById('pegawai-nama').value,
               nip: document.getElementById('pegawai-nip').value,
@@ -1592,22 +1706,41 @@
               ukuranKertas: document.getElementById('ukuran-kertas').value
           };
 
-          api.createLetter(formData)
+          const request = isEditing
+              ? api.updateLetter(letterIdBeingEdited, formData)
+              : api.createLetter(formData);
+
+          request
               .then(result => {
                   if (!result || result.status !== 'success') {
-                      throw new Error(result?.errorMsg || 'Data tidak berhasil disimpan ke Spreadsheet.');
+                      throw new Error(result?.errorMsg || `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`);
                   }
-                  const savedData = result.data || formData;
-                  showToast('Berhasil Disimpan!', 'Data KGB telah masuk ke Spreadsheet.', true);
-                  lettersDatabase = lettersDatabase.filter(item => item.id !== savedData.id);
-                  lettersDatabase.unshift(savedData);
+                  const savedData = { ...formData, ...(result.data || {}), id: isEditing ? letterIdBeingEdited : result.data?.id };
+                  if (isEditing) {
+                      const existingIndex = lettersDatabase.findIndex(item => String(item.id) === String(letterIdBeingEdited));
+                      if (existingIndex === -1) throw new Error('Arsip yang diperbarui tidak ditemukan pada daftar lokal. Muat ulang arsip.');
+                      lettersDatabase[existingIndex] = savedData;
+                      setEditingMode(null);
+                      showToast('Berhasil Diperbarui!', 'Perubahan data KGB telah disimpan ke Spreadsheet.', true);
+                  } else {
+                      lettersDatabase = lettersDatabase.filter(item => item.id !== savedData.id);
+                      lettersDatabase.unshift(savedData);
+                      showToast('Berhasil Disimpan!', 'Data KGB telah masuk ke Spreadsheet.', true);
+                  }
                   updateDashboardStats();
                   renderHistoryTable();
                   renderReport();
-                  restoreBtnAndPreview(submitBtn, originalBtnHtml, savedData);
+                  const restoredButtonHtml = isEditing
+                      ? '<i class="fas fa-eye text-lg"></i><span>Simpan & Pratinjau Surat KGB</span>'
+                      : originalBtnHtml;
+                  restoreBtnAndPreview(submitBtn, restoredButtonHtml, savedData);
               })
               .catch(error => {
-                  showToast('Penyimpanan Gagal', error?.message || 'Data tidak berhasil disimpan ke Spreadsheet.', false);
+                  showToast(
+                      isEditing ? 'Pembaruan Gagal' : 'Penyimpanan Gagal',
+                      error?.message || `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`,
+                      false
+                  );
                   submitBtn.innerHTML = originalBtnHtml;
                   submitBtn.disabled = false;
                   submitBtn.classList.remove('opacity-75', 'cursor-not-allowed');
@@ -2071,6 +2204,10 @@
               .replace(/\n/g, '\\n');
       }
 
+      function escapeInlineHandlerArg(value) {
+          return escapeHtml(escapeJsString(value));
+      }
+
       function renderHistoryTable() {
           const searchInput = document.getElementById('search-history');
           const keyword = searchInput ? searchInput.value.toLowerCase() : '';
@@ -2102,12 +2239,15 @@
                       </td>
                       <td class="py-3 px-4 text-xs font-medium text-gray-700">${escapeHtml(item.kabkot)}</td>
                       <td class="py-3 px-4 font-bold text-emerald-700">${escapeHtml(item.gajiBaru)}</td>
-                      <td class="py-3 px-4 text-xs text-gray-500">${formatDateIndo(item.suratTanggal)}</td>
+                      <td class="py-3 px-4 text-xs text-gray-500">${escapeHtml(formatDateIndo(item.suratTanggal))}</td>
                       <td class="py-3 px-4 text-center space-x-1 whitespace-nowrap">
-                          <button onclick="openPrintModalById('${escapeJsString(item.id)}')" class="bg-blue-50 hover:bg-blue-600 hover:text-white text-blue-600 p-2 rounded-lg transition" title="Pratinjau Surat">
+                          <button onclick="openPrintModalById('${escapeInlineHandlerArg(item.id)}')" class="bg-blue-50 hover:bg-blue-600 hover:text-white text-blue-600 p-2 rounded-lg transition" title="Pratinjau Surat" aria-label="Pratinjau surat ${escapeHtml(item.nama)}">
                               <i class="fas fa-print"></i>
                           </button>
-                          <button onclick="deleteHistoryItem('${escapeJsString(item.id)}', this)" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus dari Database_Surat">
+                          <button onclick="editHistoryItem('${escapeInlineHandlerArg(item.id)}')" class="bg-amber-50 hover:bg-amber-600 hover:text-white text-amber-600 p-2 rounded-lg transition" title="Edit Surat" aria-label="Edit surat ${escapeHtml(item.nama)}">
+                              <i class="fas fa-pen-to-square"></i>
+                          </button>
+                          <button onclick="deleteHistoryItem('${escapeInlineHandlerArg(item.id)}', this)" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus dari Database_Surat" aria-label="Hapus surat ${escapeHtml(item.nama)}">
                               <i class="fas fa-trash-can"></i>
                           </button>
                       </td>

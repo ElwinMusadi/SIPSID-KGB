@@ -34,6 +34,11 @@ test("maps all supported browser routes to GAS actions", () => {
   assert.equal(mapRoute("POST", "/api/letters").action, "letters.create");
   assert.deepEqual(mapRoute("DELETE", "/api/letters/ABC%201").payload, { id: "ABC 1" });
   assert.equal(mapRoute("PUT", "/api/letters"), null);
+  assert.equal(mapRoute("PUT", "/api/letters/LETTER-1").action, "letters.update");
+  assert.equal(mapRoute("PUT", "/api/letters/LETTER-1").urlId, "LETTER-1");
+  assert.equal(mapRoute("PUT", "/api/letters/LETTER-1").mutation, true);
+  assert.equal(mapRoute("PUT", "/api/letters/LETTER-1").body, true);
+  assert.equal(mapRoute("PUT", "/api/letters/KGB%202024%2F1").urlId, "KGB 2024/1");
 });
 
 test("creates and clears hardened session cookies", () => {
@@ -169,4 +174,151 @@ test("logout clears cookie", async () => {
   }, async () => gasResponse({ status: "success" }));
 
   assert.equal(response.headers.get("Set-Cookie"), clearSessionCookie());
+});
+
+test("PUT /api/letters/:id forwards body merged with URL id to GAS", async () => {
+  let envelope;
+  const body = {
+    id: "SHOULD-BE-OVERRIDDEN",
+    statusPegawai: "PNS",
+    nama: "John Doe",
+    nip: "123456789",
+    pangkat: "III/a",
+    jabatan: "Staf",
+    unit: "Dinas Pendidikan",
+    kabkot: "Kota Test",
+    skPejabat: "Bupati",
+    skTanggal: "2024-01-01",
+    skNomor: "001/SK/2024",
+    skTmt: "2024-01-01",
+    mkLamaThn: "5",
+    mkLamaBln: "0",
+    gajiLama: "3000000",
+    mkBaruThn: "6",
+    mkBaruBln: "0",
+    gajiBaruTmt: "2024-01-01",
+    gajiBaru: "3500000",
+    suratNomor: "001/SRT/2024",
+    suratTanggal: "2024-01-15",
+    signJabatan: "Kepala Dinas",
+    signNama: "Jane Smith",
+    signPangkat: "IV/a",
+    signNip: "987654321",
+    ukuranKertas: "a4",
+  };
+  const response = await handleRequest({
+    request: request("/api/letters/URL-LETTER-1", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=my-token",
+      },
+      body: JSON.stringify(body),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", data: { id: "URL-LETTER-1" } });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "letters.update");
+  assert.equal(envelope.sessionToken, "my-token");
+  assert.equal(envelope.apiSecret, env.CLOUDFLARE_API_SECRET);
+  // URL id must win over body id.
+  assert.equal(envelope.payload.id, "URL-LETTER-1");
+});
+
+test("PUT /api/letters/:id: body id different from URL id does not override URL id", async () => {
+  let envelope;
+  const body = { id: "ATTACKER-ID", nama: "X" };
+  await handleRequest({
+    request: request("/api/letters/REAL-ID", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", data: {} });
+  });
+
+  assert.equal(envelope.payload.id, "REAL-ID");
+  assert.notEqual(envelope.payload.id, "ATTACKER-ID");
+});
+
+test("PUT /api/letters/:id rejects invalid origin before contacting GAS", async () => {
+  let called = false;
+  const response = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "PUT",
+      headers: { Origin: "https://evil.example", "Content-Type": "application/json" },
+      body: "{}",
+    }),
+    env,
+  }, async () => {
+    called = true;
+    return gasResponse({ status: "success" });
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(called, false);
+});
+
+test("PUT /api/letters/:id rejects non-JSON content type", async () => {
+  const response = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "PUT",
+      headers: { Origin: "https://app.example", "Content-Type": "text/plain" },
+      body: "{}",
+    }),
+    env,
+  }, async () => gasResponse({ status: "success" }));
+
+  assert.equal(response.status, 415);
+});
+
+test("PUT /api/letters/:id returns HTTP 404 with not_found code when record is missing", async () => {
+  // GAS returns the explicit contract: status not_found + errorCode NOT_FOUND
+  const response = await handleRequest({
+    request: request("/api/letters/MISSING-ID", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=my-token",
+      },
+      body: JSON.stringify({ nama: "X" }),
+    }),
+    env,
+  }, async () => gasResponse({ status: "not_found", errorCode: "NOT_FOUND", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." }));
+
+  assert.equal(response.status, 404);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "not_found");
+
+  // Also verify that the legacy response (status not_found, no errorCode) maps correctly.
+  const legacyResponse = await handleRequest({
+    request: request("/api/letters/MISSING-ID", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=my-token",
+      },
+      body: JSON.stringify({ nama: "X" }),
+    }),
+    env,
+  }, async () => gasResponse({ status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." }));
+
+  assert.equal(legacyResponse.status, 404);
+  const legacyBody = await legacyResponse.json();
+  assert.equal(legacyBody.ok, false);
+  assert.equal(legacyBody.error.code, "not_found");
 });
