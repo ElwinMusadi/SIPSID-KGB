@@ -322,3 +322,116 @@ test("PUT /api/letters/:id returns HTTP 404 with not_found code when record is m
   assert.equal(legacyBody.ok, false);
   assert.equal(legacyBody.error.code, "not_found");
 });
+
+test("PUT /api/letters/:id returns HTTP 401 with auth_required code when session is rejected", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ nama: "Test" }),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({
+      status: "error",
+      errorCode: "AUTH_REQUIRED",
+      errorMsg: "Sesi tidak valid. Silakan login kembali.",
+    });
+  });
+
+  assert.equal(envelope.sessionToken, "");
+  assert.equal(response.status, 401);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "auth_required");
+  assert.match(body.error.message, /Sesi tidak valid/);
+});
+
+test("PUT /api/letters/:id returns HTTP 401 with session_expired code when session is expired", async () => {
+  const response = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=expired-token",
+      },
+      body: JSON.stringify({ nama: "Test" }),
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "SESSION_EXPIRED",
+    errorMsg: "Sesi telah berakhir. Silakan login kembali.",
+  }));
+
+  assert.equal(response.status, 401);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "session_expired");
+});
+
+test("PUT /api/letters/:id returns HTTP 400 with validation_error code on invalid data", async () => {
+  const response = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=valid-token",
+      },
+      body: JSON.stringify({ nama: "" }),
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "VALIDATION_ERROR",
+    errorMsg: "Field nama wajib diisi.",
+  }));
+
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "validation_error");
+  assert.equal(body.error.message, "Field nama wajib diisi.");
+});
+
+test("DELETE /api/letters/:id maps not_found and forbidden from GAS correctly", async () => {
+  const notFoundResp = await handleRequest({
+    request: request("/api/letters/MISSING-ID", {
+      method: "DELETE",
+      headers: { Origin: "https://app.example", Cookie: "sipsid_session=token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "not_found",
+    errorMsg: "Data surat tidak ditemukan atau sudah dihapus.",
+  }));
+
+  assert.equal(notFoundResp.status, 404);
+  const notFoundBody = await notFoundResp.json();
+  assert.equal(notFoundBody.ok, false);
+  assert.equal(notFoundBody.error.code, "not_found");
+
+  const forbiddenResp = await handleRequest({
+    request: request("/api/letters/LETTER-1", {
+      method: "DELETE",
+      headers: { Origin: "https://app.example", Cookie: "sipsid_session=token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "FORBIDDEN",
+    errorMsg: "Hanya administrator yang dapat menghapus arsip.",
+  }));
+
+  assert.equal(forbiddenResp.status, 403);
+  const forbiddenBody = await forbiddenResp.json();
+  assert.equal(forbiddenBody.ok, false);
+  assert.equal(forbiddenBody.error.code, "forbidden");
+});

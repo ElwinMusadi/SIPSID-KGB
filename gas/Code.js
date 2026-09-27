@@ -271,7 +271,7 @@ function createLetter_(payload, session) {
 }
 
 function deleteLetter_(id, session) {
-  var recordId = cleanText_(id, 100);
+  var recordId = validateLetterId_(id);
   if (!recordId) throw appError_("VALIDATION_ERROR", "ID surat tidak valid.");
   if (session.hakAkses !== "admin") {
     throw appError_("FORBIDDEN", "Hanya administrator yang dapat menghapus arsip.");
@@ -301,7 +301,7 @@ function deleteLetter_(id, session) {
 }
 
 function updateLetter_(id, payload, session) {
-  var recordId = cleanText_(id, 100);
+  var recordId = validateLetterId_(id);
   if (!recordId) throw appError_("VALIDATION_ERROR", "ID surat tidak valid.");
 
   // Strip any id the payload may carry so caller cannot change the record ID.
@@ -368,15 +368,27 @@ function validateAndNormalizeLetter_(payload) {
     throw appError_("VALIDATION_ERROR", "Status pegawai tidak valid.");
   }
   ["skTanggal", "skTmt", "gajiBaruTmt", "suratTanggal"].forEach(function(fieldName) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(result[fieldName])) {
+    if (!isCalendarDate_(result[fieldName])) {
       throw appError_("VALIDATION_ERROR", "Format tanggal " + fieldName + " tidak valid.");
     }
   });
-  ["mkLamaThn", "mkLamaBln", "mkBaruThn", "mkBaruBln"].forEach(function(fieldName) {
-    if (!/^\d{1,2}$/.test(result[fieldName])) {
-      throw appError_("VALIDATION_ERROR", "Nilai masa kerja tidak valid.");
+  var mkRules = [
+    { field: "mkLamaThn", min: 0, max: 40 },
+    { field: "mkLamaBln", min: 0, max: 11 },
+    { field: "mkBaruThn", min: 1, max: 40 },
+    { field: "mkBaruBln", min: 0, max: 11 }
+  ];
+  for (var r = 0; r < mkRules.length; r++) {
+    var rule = mkRules[r];
+    var val = result[rule.field];
+    if (!/^\d{1,3}$/.test(val)) {
+      throw appError_("VALIDATION_ERROR", "Nilai masa kerja " + rule.field + " tidak valid.");
     }
-  });
+    var num = Number(val);
+    if (num < rule.min || num > rule.max) {
+      throw appError_("VALIDATION_ERROR", "Nilai masa kerja " + rule.field + " harus antara " + rule.min + " dan " + rule.max + ".");
+    }
+  }
   result.ukuranKertas = result.ukuranKertas === "a4" ? "a4" : "legal";
   return result;
 }
@@ -554,6 +566,41 @@ function constantTimeEquals_(left, right) {
 
 function pad2_(value) {
   return ("0" + String(value)).slice(-2);
+}
+
+/**
+ * Validates a letter record ID received from the client.
+ * Trims whitespace, then rejects if empty, longer than 200 chars, or
+ * contains characters outside the safe set (letters, digits, hyphens,
+ * forward slashes, underscores, dots, and spaces).  The 200-char ceiling
+ * is generous enough for any existing KGB-YYYY-<UUID> ID (≤ 46 chars)
+ * and any plausible legacy ID, while still blocking oversized inputs.
+ * Returns the trimmed id on success, or null if invalid.
+ */
+function validateLetterId_(raw) {
+  var id = String(raw == null ? "" : raw).trim();
+  if (!id) return null;
+  if (id.length > 200) return null;
+  // Allow letters (including accented), digits, hyphen, slash, underscore, dot, space.
+  if (/[^\w\s\-./]/.test(id)) return null;
+  return id;
+}
+
+/**
+ * Returns true only when the string is a calendar-valid ISO date (YYYY-MM-DD).
+ * Rejects dates like 2024-02-30 or 2024-13-01 that pass a simple regex.
+ */
+function isCalendarDate_(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  var parts = value.split("-");
+  var year  = Number(parts[0]);
+  var month = Number(parts[1]);
+  var day   = Number(parts[2]);
+  if (month < 1 || month > 12) return false;
+  if (day < 1) return false;
+  // Use the "day-overflow" trick: construct month+1 day-0 equals last day of month.
+  var lastDay = new Date(year, month, 0).getDate();
+  return day <= lastDay;
 }
 
 function appError_(code, message) {
