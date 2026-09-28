@@ -30,7 +30,30 @@ dist/        Cloudflare Pages
 gas/         Google Apps Script
 ```
 
-## Konfigurasi Google Apps Script
+## Manajemen User (Admin only)
+
+Semua endpoint berikut memerlukan sesi dengan role `admin`. Input `administrator` dinormalisasi ke `admin`.
+
+| Method | Path | Aksi GAS | Keterangan |
+|---|---|---|---|
+| `GET` | `/api/users` | `users.list` | Daftar user tanpa password |
+| `POST` | `/api/users` | `users.create` | Buat user baru |
+| `PUT` | `/api/users/:username` | `users.update` | Ubah nama dan role; username immutable |
+| `PUT` | `/api/users/:username/password` | `users.resetPassword` | Reset password user |
+| `DELETE` | `/api/users/:username` | `users.delete` | Hapus user |
+
+Payload `POST /api/users`: `{ username, password, namaLengkap, hakAkses }`.
+Payload `PUT /api/users/:username`: `{ namaLengkap, hakAkses }`.
+Payload `PUT /api/users/:username/password`: `{ newPassword }`.
+
+Proteksi:
+- Username URL selalu menang atas username dalam body.
+- Duplikat username ditolak case-insensitive (HTTP 409).
+- Admin terakhir tidak bisa didowngrade atau dihapus (HTTP 422).
+- Self-delete dan self role downgrade ditolak.
+- Password minimum 8 karakter; disimpan `sha256$salt$hash` dengan `PASSWORD_PEPPER`.
+
+## Arsip Surat
 
 Tambahkan Script Properties melalui **Project Settings → Script Properties**:
 
@@ -174,7 +197,7 @@ Cloudflare browser hanya memanggil `/api/*`. Pages Functions meneruskan request 
 3. Build dan push GAS ke deployment test: `npm run push:gas`
 4. Perbarui deployment test ke **New version** (Deploy → Manage deployments → Edit → New version → Deploy).
 5. Arahkan Cloudflare Preview ke URL deployment GAS test.
-6. Uji login, master gaji, create, list, **update**, delete, laporan, dan PDF dari kedua target.
+6. Uji login, master gaji, create, list, **update**, delete, laporan, PDF, dan **manajemen user (list, create, update, reset password, delete)** dari kedua target.
 7. Jalankan `npm run verify:gas` untuk memastikan semua aksi dikenali.
 8. Backup Spreadsheet produksi.
 9. Set production properties dan Cloudflare environment variables.
@@ -203,4 +226,12 @@ npm run verify:gas   # Verifikasi deployment GAS aktif: versi dan action routing
 - Rotasi password lama karena sebelumnya pernah tertanam di frontend/history Git.
 - Rotasi shared secret jika pernah muncul dalam log atau commit.
 - Penghapusan surat dibatasi untuk role `admin`.
+- Manajemen user (list, create, update, reset password, delete) hanya dapat diakses role `admin`. Input `administrator` dinormalisasi ke `admin`.
+- Admin terakhir dilindungi dari downgrade role dan penghapusan. Self-delete dan self role downgrade juga ditolak.
+- Password existing disimpan dalam format kompatibel `sha256$salt$hash` dengan `PASSWORD_PEPPER`. `CONFIG_ERROR` dikembalikan bila pepper kosong, termasuk saat verifikasi password hash yang sudah ada. Jalankan `hashMasterUserPasswords()` dan audit agar tidak ada password plaintext sebelum produksi. Upgrade ke KDF adaptif berformat berversi tetap menjadi pekerjaan keamanan lanjutan; jangan menghapus kompatibilitas hash lama sebelum migrasi terukur selesai.
+- Token sesi untuk seluruh operasi terautentikasi (`letters.*` dan `users.*`) menyertakan `sv` (session version) — fingerprint deterministik dari `SHA-256(storedPasswordField + "|" + role).substring(0, 16)`. Setiap request memverifikasi `sv` dan role terhadap row live di sheet sehingga token lama tidak berlaku setelah reset password, perubahan role, atau delete. Token tanpa `sv` ditolak.
+- Username baru (`users.create`) divalidasi ketat: 1–64 karakter, hanya `[A-Za-z0-9._-]`, mulai huruf/digit, **tanpa truncation**. Username target (`update/resetPassword/delete`) divalidasi lebih permisif: 1–100 karakter, tanpa control chars, untuk mendukung legacy username dengan spasi.
+- Login throttle server-side memakai satu state Script Properties yang dibatasi maksimal 200 username-hash dan dilindungi `ScriptLock`; `CacheService` hanya optimasi. Username yang tidak terdaftar berbagi satu bucket sehingga flood nama acak tidak memenuhi state atau mengunci akun sah. Entry aktif tidak pernah dieviction untuk username baru. Penolakan throttle memakai respons publik yang sama dengan kredensial salah agar keberadaan username tidak dapat diidentifikasi dari status atau error code.
+- `validateUserSheet_` memeriksa minimal 4 kolom dan header A–D yang dikenali (case-insensitive, termasuk variasi legacy: `Hak Akses`, `role`, `Nama Lengkap`, dll). Sheet tanpa header menghasilkan `SCHEMA_ERROR`.
+- Gateway Cloudflare menghapus session cookie (`Max-Age=0`) saat upstream mengembalikan `AUTH_REQUIRED`, `SESSION_EXPIRED`, atau `INVALID_SESSION`.
 - Endpoint GAS tetap publik secara jaringan agar dapat dipanggil Cloudflare, tetapi action HTTP ditolak tanpa shared secret dan session valid.

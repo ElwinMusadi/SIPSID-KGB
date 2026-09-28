@@ -9,6 +9,8 @@ const ROUTES = new Map([
   ["GET /api/bootstrap", { action: "bootstrap.get" }],
   ["GET /api/letters", { action: "letters.list" }],
   ["POST /api/letters", { action: "letters.create", body: true, mutation: true }],
+  ["GET /api/users", { action: "users.list" }],
+  ["POST /api/users", { action: "users.create", body: true, mutation: true }],
 ]);
 
 export function mapRoute(method, pathname) {
@@ -33,6 +35,42 @@ export function mapRoute(method, pathname) {
       try {
         const id = decodeURIComponent(match[1]).trim();
         if (id) return { action: "letters.update", body: true, mutation: true, urlId: id };
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  // User management dynamic routes — URL username wins over body.
+  if (method.toUpperCase() === "PUT") {
+    // PUT /api/users/:username/password
+    const pwMatch = pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+    if (pwMatch) {
+      try {
+        const username = decodeURIComponent(pwMatch[1]).trim();
+        if (username) return { action: "users.resetPassword", body: true, mutation: true, urlUsername: username };
+      } catch {
+        return null;
+      }
+    }
+    // PUT /api/users/:username
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch) {
+      try {
+        const username = decodeURIComponent(userMatch[1]).trim();
+        if (username) return { action: "users.update", body: true, mutation: true, urlUsername: username };
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  if (method.toUpperCase() === "DELETE") {
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch) {
+      try {
+        const username = decodeURIComponent(userMatch[1]).trim();
+        if (username) return { action: "users.delete", mutation: true, payload: { username } };
       } catch {
         return null;
       }
@@ -138,7 +176,11 @@ function sanitizeClientValue(value) {
   if (!value || typeof value !== "object") return value;
   const sanitized = {};
   for (const [key, item] of Object.entries(value)) {
-    if (/^(?:apiSecret|secret|sessionToken|token|password|stack)$/i.test(key)) continue;
+    // Strip known sensitive field names recursively at any depth.
+    // "hash" and "passwordHash" are added alongside "password" so that
+    // a GAS bug accidentally including the stored password/hash field in
+    // users.list data cannot leak it to the browser.
+    if (/^(?:apiSecret|secret|sessionToken|token|password|passwordHash|hash|stack)$/i.test(key)) continue;
     sanitized[key] = sanitizeClientValue(item);
   }
   return sanitized;
@@ -212,8 +254,17 @@ function upstreamStatus(normalized, responseStatus) {
   if (normalizedCode === "unauthorized" || normalizedCode === "auth_required" || normalizedCode === "invalid_session" || normalizedCode === "session_expired") return 401;
   if (normalizedCode === "forbidden" || normalizedCode === "unauthorized_gateway") return 403;
   if (normalizedCode === "not_found") return 404;
+  if (normalizedCode === "duplicate_user") return 409;
   if (normalizedCode === "validation_error" || normalizedCode === "invalid_credentials" || normalizedCode === "bad_request") return 400;
+  if (normalizedCode === "last_admin_protected") return 422;
+  if (normalizedCode === "too_many_attempts") return 429;
   return 502;
+}
+
+/** Returns true when the error code indicates the session is no longer valid. */
+function isSessionInvalidCode(code) {
+  const c = String(code || "").toLowerCase();
+  return c === "auth_required" || c === "session_expired" || c === "invalid_session";
 }
 
 export async function handleRequest(context, fetchImpl = fetch) {
@@ -239,6 +290,10 @@ export async function handleRequest(context, fetchImpl = fetch) {
   // id into the payload and ensure it always wins over any id in the body.
   if (route.urlId) {
     payload = { ...payload, id: route.urlId };
+  }
+  // For user routes with a URL segment username, merge it and ensure URL wins.
+  if (route.urlUsername) {
+    payload = { ...payload, username: route.urlUsername };
   }
 
   const sessionToken = parseCookies(request.headers.get("Cookie"))[SESSION_COOKIE] || "";
@@ -285,6 +340,9 @@ export async function handleRequest(context, fetchImpl = fetch) {
       delete normalized.data.expiresIn;
     }
   } else if (route.action === "auth.logout") {
+    headers["Set-Cookie"] = clearSessionCookie();
+  } else if (!normalized.ok && isSessionInvalidCode(normalized.error?.code)) {
+    // Clear the stale session cookie so the browser does not keep sending it.
     headers["Set-Cookie"] = clearSessionCookie();
   }
 

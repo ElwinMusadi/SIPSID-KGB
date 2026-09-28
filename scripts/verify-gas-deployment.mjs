@@ -40,6 +40,11 @@ const REQUIRED_ACTIONS = [
   "letters.create",
   "letters.update",
   "letters.delete",
+  "users.list",
+  "users.create",
+  "users.update",
+  "users.resetPassword",
+  "users.delete",
   "system.manifest",
 ];
 

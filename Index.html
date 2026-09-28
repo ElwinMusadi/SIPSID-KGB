@@ -327,6 +327,13 @@
           >
             <i class="fas fa-chart-bar"></i><span>Laporan Rekapitulasi</span>
           </button>
+          <button
+            onclick="navigate('users')"
+            id="nav-users"
+            class="nav-btn hidden py-4 px-3 border-b-2 font-medium text-sm items-center space-x-2 whitespace-nowrap transition border-transparent text-gray-500 hover:text-gray-700"
+          >
+            <i class="fas fa-users-gear"></i><span>Manajemen User</span>
+          </button>
         </div>
       </div>
 
@@ -1097,7 +1104,106 @@
             </div>
           </div>
         </section>
+
+        <!-- VIEW: MANAJEMEN USER (ADMIN) -->
+        <section id="view-users" class="app-view hidden space-y-6">
+          <div class="bg-white rounded-2xl p-5 sm:p-8 shadow-sm border border-gray-200">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-gray-200">
+              <div>
+                <h2 class="text-xl font-bold text-gray-800">Manajemen User</h2>
+                <p class="text-xs text-gray-500 mt-1">Kelola akun, nama lengkap, peran, dan kata sandi pengguna.</p>
+              </div>
+              <button
+                type="button"
+                onclick="openUserFormModal()"
+                class="w-full sm:w-auto bg-blue-700 hover:bg-blue-800 text-white font-bold px-5 py-2.5 rounded-xl shadow-md transition flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              >
+                <i class="fas fa-user-plus"></i><span>Tambah User</span>
+              </button>
+            </div>
+
+            <div id="users-state" class="py-12 text-center text-gray-500" role="status" aria-live="polite"></div>
+            <div id="users-content" class="hidden mt-6">
+              <div class="hidden md:block overflow-x-auto rounded-xl border border-gray-200">
+                <table class="w-full text-left border-collapse">
+                  <thead class="bg-slate-50 border-b border-gray-200 text-xs font-bold text-gray-500 uppercase tracking-wider">
+                    <tr>
+                      <th class="py-3.5 px-4">Username</th>
+                      <th class="py-3.5 px-4">Nama Lengkap</th>
+                      <th class="py-3.5 px-4">Role</th>
+                      <th class="py-3.5 px-4 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody id="users-table-body" class="divide-y divide-gray-100 text-sm text-gray-700"></tbody>
+                </table>
+              </div>
+              <div id="users-card-list" class="md:hidden space-y-3"></div>
+            </div>
+          </div>
+        </section>
       </main>
+    </div>
+
+    <!-- MODAL: TAMBAH / EDIT USER -->
+    <div id="user-form-modal" class="hidden fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="user-form-title">
+      <div class="bg-white w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden">
+        <div class="px-5 sm:px-6 py-4 bg-slate-800 text-white flex items-center justify-between">
+          <h3 id="user-form-title" class="font-bold">Tambah User</h3>
+          <button type="button" onclick="closeUserFormModal()" class="p-2 rounded-lg hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-white" aria-label="Tutup form user"><i class="fas fa-xmark"></i></button>
+        </div>
+        <form id="user-form" onsubmit="submitUserForm(event)" class="p-5 sm:p-6 space-y-4">
+          <div>
+            <label for="user-form-username" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Username *</label>
+            <input id="user-form-username" type="text" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" title="Gunakan maksimal 64 karakter: huruf, angka, titik, underscore, atau strip; mulai dengan huruf atau angka." autocomplete="username" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+            <p id="user-username-help" class="hidden text-xs text-gray-500 mt-1">Username tidak dapat diubah.</p>
+          </div>
+          <div>
+            <label for="user-form-name" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Nama Lengkap *</label>
+            <input id="user-form-name" type="text" required maxlength="160" autocomplete="name" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+          <div>
+            <label for="user-form-role" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Role *</label>
+            <select id="user-form-role" required class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <option value="pengelola">Pengelola</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div id="user-password-field">
+            <label for="user-form-password" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Password *</label>
+            <input id="user-form-password" type="password" minlength="8" maxlength="200" autocomplete="new-password" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" aria-describedby="user-password-help" />
+            <p id="user-password-help" class="text-xs text-gray-500 mt-1">Minimal 8 karakter.</p>
+          </div>
+          <div class="pt-3 flex flex-col-reverse sm:flex-row sm:justify-end gap-2 border-t border-gray-100">
+            <button type="button" onclick="closeUserFormModal()" class="px-4 py-2.5 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200">Batal</button>
+            <button id="user-form-submit" type="submit" class="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-blue-700 hover:bg-blue-800 flex items-center justify-center gap-2"><i class="fas fa-floppy-disk"></i><span>Simpan</span></button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: RESET PASSWORD -->
+    <div id="reset-password-modal" class="hidden fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="reset-password-title">
+      <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+        <div class="px-5 sm:px-6 py-4 bg-slate-800 text-white flex items-center justify-between">
+          <h3 id="reset-password-title" class="font-bold">Reset Password</h3>
+          <button type="button" onclick="closeResetPasswordModal()" class="p-2 rounded-lg hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-white" aria-label="Tutup reset password"><i class="fas fa-xmark"></i></button>
+        </div>
+        <form id="reset-password-form" onsubmit="submitResetPassword(event)" class="p-5 sm:p-6 space-y-4">
+          <p class="text-sm text-gray-600">Atur password baru untuk <strong id="reset-password-username" class="text-gray-900"></strong>.</p>
+          <div>
+            <label for="reset-password-new" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Password Baru *</label>
+            <input id="reset-password-new" type="password" minlength="8" maxlength="200" required autocomplete="new-password" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+          <div>
+            <label for="reset-password-confirm" class="block text-xs font-bold text-gray-700 uppercase mb-1.5">Konfirmasi Password *</label>
+            <input id="reset-password-confirm" type="password" minlength="8" maxlength="200" required autocomplete="new-password" class="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+          </div>
+          <div class="pt-3 flex flex-col-reverse sm:flex-row sm:justify-end gap-2 border-t border-gray-100">
+            <button type="button" onclick="closeResetPasswordModal()" class="px-4 py-2.5 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200">Batal</button>
+            <button id="reset-password-submit" type="submit" class="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-blue-700 hover:bg-blue-800 flex items-center justify-center gap-2"><i class="fas fa-key"></i><span>Reset Password</span></button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <!-- MODAL: PRATINJAU LAYAR KERTAS (SURAT KGB) -->
@@ -1215,25 +1321,50 @@
           return typeof google !== 'undefined' && google.script && google.script.run;
       }
 
+      const SESSION_ERROR_CODES = new Set(['AUTH_REQUIRED', 'SESSION_EXPIRED', 'INVALID_SESSION', 'HTTP_401']);
+
+      function getApiErrorCode(value, httpStatus = 0) {
+          if (httpStatus === 401) return 'HTTP_401';
+          return String(value?.code || value?.error?.code || value?.errorCode || '').trim().toUpperCase();
+      }
+
+      function isSessionError(value, httpStatus = 0) {
+          return SESSION_ERROR_CODES.has(getApiErrorCode(value, httpStatus));
+      }
+
+      function handleSessionError(value, httpStatus = 0) {
+          if (!isSessionError(value, httpStatus)) return false;
+          expireClientSession();
+          return true;
+      }
+
       function runGas(method, ...args) {
           return new Promise((resolve, reject) => {
               let runner = google.script.run
-                  .withSuccessHandler(resolve)
-                  .withFailureHandler(reject);
+                  .withSuccessHandler(result => {
+                      if (method !== 'apiLogin' && method !== 'apiLogout') handleSessionError(result);
+                      resolve(result);
+                  })
+                  .withFailureHandler(error => {
+                      if (method !== 'apiLogin' && method !== 'apiLogout') handleSessionError(error);
+                      reject(error);
+                  });
               runner[method](...args);
           });
       }
 
       async function fetchJson(url, options = {}) {
+          const { skipSessionExpiry = false, ...fetchOptions } = options;
           const response = await fetch(url, {
               credentials: 'same-origin',
-              ...options,
-              headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+              ...fetchOptions,
+              headers: { 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) }
           });
           const result = await response.json().catch(() => null);
           if (!response.ok || !result || result.ok === false || result.status === 'error') {
               const error = new Error(result?.error?.message || result?.errorMsg || 'Layanan tidak dapat memproses permintaan.');
               error.code = result?.error?.code || result?.errorCode || `HTTP_${response.status}`;
+              if (!skipSessionExpiry) handleSessionError(error, response.status);
               throw error;
           }
           return result.ok === true ? result.data : result;
@@ -1263,7 +1394,7 @@
                   sessionStorage.setItem('sipsid_session', result.sessionToken);
                   return result;
               }
-              const data = await fetchJson('/api/auth/login', { method: 'POST', body: JSON.stringify(credentials) });
+              const data = await fetchJson('/api/auth/login', { method: 'POST', body: JSON.stringify(credentials), skipSessionExpiry: true });
               return { status: 'success', ...data };
           },
           async logout() {
@@ -1271,7 +1402,7 @@
                   sessionStorage.removeItem('sipsid_session');
                   return runGas('apiLogout');
               }
-              await fetchJson('/api/auth/logout', { method: 'POST', body: '{}' });
+              await fetchJson('/api/auth/logout', { method: 'POST', body: '{}', skipSessionExpiry: true });
               return { status: 'success' };
           },
           async getBootstrap() {
@@ -1295,6 +1426,26 @@
               if (isGasRuntime()) return runGas('apiDeleteLetter', sessionStorage.getItem('sipsid_session') || '', id);
               const data = await fetchJson(`/api/letters/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}' });
               return { status: 'success', ...data };
+          },
+          async listUsers() {
+              if (isGasRuntime()) return runGas('apiListUsers', sessionStorage.getItem('sipsid_session') || '');
+              return { status: 'success', data: await fetchJson('/api/users') };
+          },
+          async createUser(payload) {
+              if (isGasRuntime()) return runGas('apiCreateUser', sessionStorage.getItem('sipsid_session') || '', payload);
+              return { status: 'success', data: await fetchJson('/api/users', { method: 'POST', body: JSON.stringify(payload) }) };
+          },
+          async updateUser(username, payload) {
+              if (isGasRuntime()) return runGas('apiUpdateUser', sessionStorage.getItem('sipsid_session') || '', username, payload);
+              return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}`, { method: 'PUT', body: JSON.stringify(payload) }) };
+          },
+          async resetUserPassword(username, newPassword) {
+              if (isGasRuntime()) return runGas('apiResetUserPassword', sessionStorage.getItem('sipsid_session') || '', username, { newPassword });
+              return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}/password`, { method: 'PUT', body: JSON.stringify({ newPassword }) }) };
+          },
+          async deleteUser(username) {
+              if (isGasRuntime()) return runGas('apiDeleteUser', sessionStorage.getItem('sipsid_session') || '', username);
+              return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE', body: '{}' }) };
           }
       };
 
@@ -1305,6 +1456,14 @@
       let activeLetterData = null;
       let activeReportContext = null;
       let editingLetterId = null;
+      let usersDatabase = [];
+      let usersLoaded = false;
+      let usersLoading = false;
+      let editingUsername = null;
+      let resetPasswordUsername = null;
+      let activeUserDialog = null;
+      let userDialogTrigger = null;
+      let clientSessionExpiring = false;
 
       // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
       const kopSuratHTML = `
@@ -1494,7 +1653,61 @@
           setSalaryFromMaster(document.getElementById('gaji-baru'), listData, pangkatVal, mkBaru);
       }
 
+      function isAdminUser(user = currentUser) {
+          const role = String(user?.hakAkses || user?.role || '').trim().toLowerCase();
+          return role === 'admin' || role === 'administrator';
+      }
+
+      function updateAdminNavigation() {
+          const navUsers = document.getElementById('nav-users');
+          if (!navUsers) return;
+          navUsers.classList.toggle('hidden', !isAdminUser());
+          navUsers.classList.toggle('flex', isAdminUser());
+      }
+
+      function resetAuthenticatedState() {
+          currentUser = null;
+          lettersDatabase = [];
+          arsipSuratLoaded = false;
+          arsipSuratLoading = false;
+          usersDatabase = [];
+          usersLoaded = false;
+          usersLoading = false;
+          editingUsername = null;
+          resetPasswordUsername = null;
+          activeLetterData = null;
+          activeReportContext = null;
+          sessionStorage.removeItem('sipsid_session');
+          updateAdminNavigation();
+          closeUserDialog(activeUserDialog, false);
+          document.getElementById('print-modal-container').classList.add('hidden');
+          document.getElementById('report-print-container').classList.add('hidden');
+          document.body.classList.remove('print-a4', 'print-legal');
+          setEditingMode(null);
+          document.getElementById('main-app').classList.add('hidden');
+          document.getElementById('main-app').removeAttribute('inert');
+          document.getElementById('main-app').removeAttribute('aria-hidden');
+          document.getElementById('login-page').classList.remove('hidden');
+      }
+
+      function expireClientSession() {
+          if (clientSessionExpiring) return;
+          clientSessionExpiring = true;
+          resetAuthenticatedState();
+          const errorMsg = document.getElementById('login-error-msg');
+          if (errorMsg) {
+              errorMsg.classList.remove('hidden');
+              errorMsg.lastChild.textContent = ' Sesi berakhir. Silakan masuk kembali.';
+          }
+          document.getElementById('username')?.focus();
+          clientSessionExpiring = false;
+      }
+
       function navigate(viewId, preserveEdit = false) {
+          if (viewId === 'users' && !isAdminUser()) {
+              showToast('Akses Ditolak', 'Manajemen user hanya dapat diakses administrator.', false);
+              viewId = 'dashboard';
+          }
           if (viewId === 'create' && editingLetterId && !preserveEdit) resetForm(false);
 
           document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
@@ -1521,6 +1734,7 @@
               renderReport();
               loadArsipSurat();
           }
+          if (viewId === 'users') loadUsers();
       }
 
       async function login(e) {
@@ -1538,6 +1752,7 @@
               }
               const result = await api.login({ username: user, password: pass });
               currentUser = result.user;
+              updateAdminNavigation();
               document.getElementById('active-user-name').innerHTML = `<i class="fas fa-user-circle mr-1.5 text-sm"></i> <span class="truncate">${escapeHtml(currentUser.namaLengkap)}</span>`;
               document.getElementById('welcome-message').innerText = `Selamat Datang, ${currentUser.namaLengkap.split(' ')[0]}`;
               if (errorMsg) errorMsg.classList.add('hidden');
@@ -1563,12 +1778,7 @@
 
       async function logout() {
           try { await api.logout(); } catch (error) { console.warn('Logout backend gagal:', error); }
-          currentUser = null;
-          lettersDatabase = [];
-          arsipSuratLoaded = false;
-          setEditingMode(null);
-          document.getElementById('main-app').classList.add('hidden');
-          document.getElementById('login-page').classList.remove('hidden');
+          resetAuthenticatedState();
       }
 
       function setEditingMode(id) {
@@ -2222,6 +2432,319 @@
 
       function escapeInlineHandlerArg(value) {
           return escapeHtml(escapeJsString(value));
+      }
+
+      function userApiResultData(result, fallbackMessage) {
+          if (!result || result.status !== 'success') {
+              throw new Error(result?.errorMsg || fallbackMessage);
+          }
+          return result.data;
+      }
+
+      function setUsersState(type, message = '') {
+          const state = document.getElementById('users-state');
+          const content = document.getElementById('users-content');
+          if (!state || !content) return;
+          const presentations = {
+              loading: `<i class="fas fa-spinner fa-spin text-3xl text-blue-500 mb-3 block"></i><span>${escapeHtml(message || 'Memuat data user...')}</span>`,
+              error: `<i class="fas fa-triangle-exclamation text-3xl text-red-500 mb-3 block"></i><p class="text-red-600 font-medium">${escapeHtml(message)}</p><button type="button" onclick="loadUsers(true)" class="mt-4 px-4 py-2 rounded-lg bg-red-50 text-red-700 font-bold text-sm hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-500">Coba Lagi</button>`,
+              empty: '<i class="fas fa-users text-3xl text-gray-300 mb-3 block"></i><p class="font-medium">Belum ada user.</p>'
+          };
+          if (type === 'ready') {
+              state.classList.add('hidden');
+              content.classList.remove('hidden');
+              return;
+          }
+          content.classList.add('hidden');
+          state.classList.remove('hidden');
+          state.innerHTML = presentations[type] || '';
+      }
+
+      async function loadUsers(force = false) {
+          if (!isAdminUser() || usersLoading || (usersLoaded && !force)) {
+              if (usersLoaded && isAdminUser()) renderUsers();
+              return;
+          }
+          usersLoading = true;
+          setUsersState('loading');
+          try {
+              const result = await api.listUsers();
+              const data = userApiResultData(result, 'Data user gagal dimuat.');
+              usersDatabase = Array.isArray(data) ? data : [];
+              usersLoaded = true;
+              renderUsers();
+          } catch (error) {
+              const message = error?.message || 'Data user gagal dimuat.';
+              usersLoaded = false;
+              setUsersState('error', message);
+              showToast('User Gagal Dimuat', message, false);
+          } finally {
+              usersLoading = false;
+          }
+      }
+
+      function renderUserActions(user, mobile = false) {
+          const username = String(user.username || '');
+          const safeArg = escapeInlineHandlerArg(username);
+          const safeLabel = escapeHtml(username);
+          const isSelf = String(currentUser?.username || '').toLowerCase() === username.toLowerCase();
+          const buttonClass = mobile
+              ? 'flex-1 px-3 py-2 rounded-lg text-xs font-bold transition focus:outline-none focus:ring-2'
+              : 'p-2 rounded-lg transition focus:outline-none focus:ring-2';
+          return `
+              <button type="button" onclick="openUserFormModal('${safeArg}')" class="${buttonClass} bg-amber-50 hover:bg-amber-100 text-amber-700 focus:ring-amber-500" title="Edit user" aria-label="Edit user ${safeLabel}"><i class="fas fa-pen-to-square"></i>${mobile ? '<span class="ml-1.5">Edit</span>' : ''}</button>
+              <button type="button" onclick="openResetPasswordModal('${safeArg}')" class="${buttonClass} bg-blue-50 hover:bg-blue-100 text-blue-700 focus:ring-blue-500" title="Reset password" aria-label="Reset password ${safeLabel}"><i class="fas fa-key"></i>${mobile ? '<span class="ml-1.5">Reset</span>' : ''}</button>
+              <button type="button" onclick="deleteUserAccount('${safeArg}', this)" ${isSelf ? 'disabled' : ''} class="${buttonClass} bg-red-50 hover:bg-red-100 text-red-700 focus:ring-red-500 disabled:opacity-40 disabled:cursor-not-allowed" title="${isSelf ? 'Akun sendiri tidak dapat dihapus' : 'Hapus user'}" aria-label="Hapus user ${safeLabel}"><i class="fas fa-trash-can"></i>${mobile ? '<span class="ml-1.5">Hapus</span>' : ''}</button>
+          `;
+      }
+
+      function renderUsers() {
+          const tbody = document.getElementById('users-table-body');
+          const cards = document.getElementById('users-card-list');
+          if (!tbody || !cards) return;
+          tbody.innerHTML = '';
+          cards.innerHTML = '';
+          if (usersDatabase.length === 0) {
+              setUsersState('empty');
+              return;
+          }
+
+          usersDatabase.forEach(user => {
+              const username = escapeHtml(user.username || '-');
+              const namaLengkap = escapeHtml(user.namaLengkap || '-');
+              const role = escapeHtml(user.hakAkses || user.role || '-');
+              tbody.innerHTML += `
+                  <tr class="hover:bg-slate-50 transition">
+                      <td class="py-3.5 px-4 font-mono font-semibold text-gray-900">${username}</td>
+                      <td class="py-3.5 px-4">${namaLengkap}</td>
+                      <td class="py-3.5 px-4"><span class="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-[11px] font-bold uppercase">${role}</span></td>
+                      <td class="py-3.5 px-4"><div class="flex justify-end gap-1.5">${renderUserActions(user)}</div></td>
+                  </tr>`;
+              cards.innerHTML += `
+                  <article class="rounded-xl border border-gray-200 p-4 shadow-sm">
+                      <div class="flex items-start justify-between gap-3">
+                          <div class="min-w-0"><h3 class="font-mono font-bold text-gray-900 truncate">${username}</h3><p class="text-sm text-gray-600 mt-1 break-words">${namaLengkap}</p></div>
+                          <span class="shrink-0 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-[10px] font-bold uppercase">${role}</span>
+                      </div>
+                      <div class="flex gap-2 mt-4 pt-3 border-t border-gray-100">${renderUserActions(user, true)}</div>
+                  </article>`;
+          });
+          setUsersState('ready');
+      }
+
+      const USER_DIALOG_FOCUSABLE_SELECTOR = [
+          'button:not([disabled])',
+          'input:not([disabled]):not([type="hidden"])',
+          'select:not([disabled])',
+          'textarea:not([disabled])',
+          '[href]',
+          '[tabindex]:not([tabindex="-1"])'
+      ].join(',');
+
+      function setUserDialogOpen(modal, initialFocus) {
+          const nextTrigger = activeUserDialog
+              ? userDialogTrigger
+              : (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+          if (activeUserDialog && activeUserDialog !== modal) closeUserDialog(activeUserDialog, false);
+          userDialogTrigger = nextTrigger;
+          activeUserDialog = modal;
+          modal.classList.remove('hidden');
+          modal.setAttribute('aria-hidden', 'false');
+          const app = document.getElementById('main-app');
+          app.setAttribute('inert', '');
+          app.setAttribute('aria-hidden', 'true');
+          setTimeout(() => initialFocus?.focus(), 0);
+      }
+
+      function closeUserDialog(modal = activeUserDialog, restoreFocus = true) {
+          if (!modal) return;
+          modal.classList.add('hidden');
+          modal.setAttribute('aria-hidden', 'true');
+          if (modal === activeUserDialog) activeUserDialog = null;
+          const app = document.getElementById('main-app');
+          if (!activeUserDialog) {
+              app.removeAttribute('inert');
+              app.removeAttribute('aria-hidden');
+              const trigger = userDialogTrigger;
+              userDialogTrigger = null;
+              if (restoreFocus && trigger?.isConnected) setTimeout(() => trigger.focus(), 0);
+          }
+      }
+
+      function handleUserDialogKeydown(event) {
+          if (!activeUserDialog || activeUserDialog.classList.contains('hidden')) return;
+          if (event.key === 'Escape') {
+              event.preventDefault();
+              activeUserDialog === document.getElementById('user-form-modal')
+                  ? closeUserFormModal()
+                  : closeResetPasswordModal();
+              return;
+          }
+          if (event.key !== 'Tab') return;
+          const focusable = Array.from(activeUserDialog.querySelectorAll(USER_DIALOG_FOCUSABLE_SELECTOR))
+              .filter(element => !element.hasAttribute('disabled') && element.getClientRects().length > 0);
+          if (focusable.length === 0) {
+              event.preventDefault();
+              return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+          }
+      }
+
+      document.addEventListener('keydown', handleUserDialogKeydown);
+
+      function openUserFormModal(username = '') {
+          if (!isAdminUser()) return navigate('dashboard');
+          const user = username
+              ? usersDatabase.find(item => String(item.username).toLowerCase() === String(username).toLowerCase())
+              : null;
+          if (username && !user) {
+              showToast('User Tidak Ditemukan', 'Data user sudah tidak tersedia. Muat ulang daftar.', false);
+              return;
+          }
+          editingUsername = user ? String(user.username) : null;
+          const modal = document.getElementById('user-form-modal');
+          const usernameInput = document.getElementById('user-form-username');
+          const roleInput = document.getElementById('user-form-role');
+          const isSelf = user && String(currentUser?.username || '').toLowerCase() === editingUsername.toLowerCase();
+          document.getElementById('user-form').reset();
+          document.getElementById('user-form-title').innerText = user ? 'Edit User' : 'Tambah User';
+          usernameInput.value = user?.username || '';
+          usernameInput.readOnly = Boolean(user);
+          usernameInput.classList.toggle('bg-gray-100', Boolean(user));
+          document.getElementById('user-username-help').classList.toggle('hidden', !user);
+          document.getElementById('user-form-name').value = user?.namaLengkap || '';
+          roleInput.value = String(user?.hakAkses || user?.role || 'pengelola').toLowerCase() === 'administrator' ? 'admin' : (user?.hakAkses || user?.role || 'pengelola');
+          roleInput.disabled = Boolean(isSelf);
+          document.getElementById('user-password-field').classList.toggle('hidden', Boolean(user));
+          document.getElementById('user-form-password').required = !user;
+          setUserDialogOpen(modal, user ? document.getElementById('user-form-name') : usernameInput);
+      }
+
+      function closeUserFormModal() {
+          closeUserDialog(document.getElementById('user-form-modal'));
+          editingUsername = null;
+      }
+
+      async function submitUserForm(event) {
+          event.preventDefault();
+          if (!isAdminUser()) return navigate('dashboard');
+          const usernameInput = document.getElementById('user-form-username');
+          const nameInput = document.getElementById('user-form-name');
+          const passwordInput = document.getElementById('user-form-password');
+          usernameInput.value = usernameInput.value.trim();
+          nameInput.value = nameInput.value.trim();
+          nameInput.setCustomValidity(nameInput.value ? '' : 'Nama lengkap wajib diisi.');
+          if (!event.currentTarget.checkValidity()) {
+              event.currentTarget.reportValidity();
+              return;
+          }
+          const button = document.getElementById('user-form-submit');
+          const originalHtml = button.innerHTML;
+          const isEditing = Boolean(editingUsername);
+          const payload = {
+              username: usernameInput.value,
+              namaLengkap: nameInput.value,
+              hakAkses: document.getElementById('user-form-role').value
+          };
+          if (!isEditing) payload.password = passwordInput.value;
+          button.disabled = true;
+          button.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Menyimpan...</span>';
+          try {
+              const result = isEditing ? await api.updateUser(editingUsername, payload) : await api.createUser(payload);
+              userApiResultData(result, `User gagal ${isEditing ? 'diperbarui' : 'ditambahkan'}.`);
+              closeUserFormModal();
+              usersLoaded = false;
+              await loadUsers(true);
+              showToast(isEditing ? 'User Diperbarui' : 'User Ditambahkan', `Data user ${payload.username} berhasil disimpan.`, true);
+          } catch (error) {
+              showToast('Penyimpanan Gagal', error?.message || 'Data user gagal disimpan.', false);
+          } finally {
+              button.disabled = false;
+              button.innerHTML = originalHtml;
+          }
+      }
+
+      function openResetPasswordModal(username) {
+          if (!isAdminUser()) return navigate('dashboard');
+          resetPasswordUsername = String(username || '');
+          document.getElementById('reset-password-form').reset();
+          document.getElementById('reset-password-username').innerText = resetPasswordUsername;
+          setUserDialogOpen(document.getElementById('reset-password-modal'), document.getElementById('reset-password-new'));
+      }
+
+      function closeResetPasswordModal() {
+          closeUserDialog(document.getElementById('reset-password-modal'));
+          resetPasswordUsername = null;
+      }
+
+      async function submitResetPassword(event) {
+          event.preventDefault();
+          if (!isAdminUser()) return navigate('dashboard');
+          if (!event.currentTarget.checkValidity()) {
+              event.currentTarget.reportValidity();
+              return;
+          }
+          const newPassword = document.getElementById('reset-password-new').value;
+          const confirmation = document.getElementById('reset-password-confirm').value;
+          if (newPassword !== confirmation) {
+              showToast('Konfirmasi Tidak Sama', 'Password baru dan konfirmasi harus sama.', false);
+              document.getElementById('reset-password-confirm').focus();
+              return;
+          }
+          const button = document.getElementById('reset-password-submit');
+          const originalHtml = button.innerHTML;
+          button.disabled = true;
+          button.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>Mereset...</span>';
+          try {
+              const username = resetPasswordUsername;
+              const result = await api.resetUserPassword(username, newPassword);
+              userApiResultData(result, 'Password gagal direset.');
+              closeResetPasswordModal();
+              usersLoaded = false;
+              await loadUsers(true);
+              showToast('Password Direset', `Password user ${username} berhasil diperbarui.`, true);
+          } catch (error) {
+              showToast('Reset Password Gagal', error?.message || 'Password gagal direset.', false);
+          } finally {
+              button.disabled = false;
+              button.innerHTML = originalHtml;
+          }
+      }
+
+      async function deleteUserAccount(username, button) {
+          if (!isAdminUser()) return navigate('dashboard');
+          if (String(currentUser?.username || '').toLowerCase() === String(username).toLowerCase()) {
+              showToast('Aksi Ditolak', 'Akun yang sedang digunakan tidak dapat dihapus.', false);
+              return;
+          }
+          if (!window.confirm(`Hapus user ${username}?\n\nAkun yang dihapus tidak dapat digunakan untuk login.`)) return;
+          const originalHtml = button?.innerHTML || '';
+          if (button) {
+              button.disabled = true;
+              button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          }
+          try {
+              const result = await api.deleteUser(username);
+              userApiResultData(result, 'User gagal dihapus.');
+              usersLoaded = false;
+              await loadUsers(true);
+              showToast('User Dihapus', `User ${username} berhasil dihapus.`, true);
+          } catch (error) {
+              showToast('Hapus User Gagal', error?.message || 'User gagal dihapus.', false);
+          } finally {
+              if (button?.isConnected) {
+                  button.disabled = false;
+                  button.innerHTML = originalHtml;
+              }
+          }
       }
 
       function renderHistoryTable() {

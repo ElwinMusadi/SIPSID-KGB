@@ -9,7 +9,7 @@
  * Version: New version > Deploy. Tanpa langkah ini, endpoint produksi masih
  * melayani versi lama dan akan mengembalikan ACTION_NOT_FOUND untuk aksi baru.
  */
-var GAS_BACKEND_VERSION = "2.1.0";
+var GAS_BACKEND_VERSION = "2.4.4";
 
 var CONFIG_KEYS_ = {
   SPREADSHEET_ID: "SPREADSHEET_ID",
@@ -81,23 +81,50 @@ function apiGetBootstrap() {
 }
 
 function apiListLetters(sessionToken) {
-  requireSession_(sessionToken);
+  requireCurrentSession_(sessionToken, false);
   return listLetters_();
 }
 
 function apiCreateLetter(sessionToken, payload) {
-  var session = requireSession_(sessionToken);
+  var session = requireCurrentSession_(sessionToken, false);
   return createLetter_(payload || {}, session);
 }
 
 function apiDeleteLetter(sessionToken, id) {
-  var session = requireSession_(sessionToken);
+  var session = requireCurrentSession_(sessionToken, false);
   return deleteLetter_(id, session);
 }
 
 function apiUpdateLetter(sessionToken, id, payload) {
-  var session = requireSession_(sessionToken);
+  var session = requireCurrentSession_(sessionToken, false);
   return updateLetter_(id, payload || {}, session);
+}
+
+// ─── User Management Public Wrappers (GAS direct UI) ───────────────────────
+
+function apiListUsers(sessionToken) {
+  var session = requireCurrentSession_(sessionToken, true);
+  return listUsers_(session);
+}
+
+function apiCreateUser(sessionToken, payload) {
+  var session = requireCurrentSession_(sessionToken, true);
+  return createUser_(payload || {}, session);
+}
+
+function apiUpdateUser(sessionToken, username, payload) {
+  var session = requireCurrentSession_(sessionToken, true);
+  return updateUser_(username, payload || {}, session);
+}
+
+function apiResetUserPassword(sessionToken, username, payload) {
+  var session = requireCurrentSession_(sessionToken, true);
+  return resetUserPassword_(username, payload || {}, session);
+}
+
+function apiDeleteUser(sessionToken, username) {
+  var session = requireCurrentSession_(sessionToken, true);
+  return deleteUser_(username, session);
 }
 
 // Compatibility wrappers for deployments that still call the old functions.
@@ -125,6 +152,13 @@ function dispatchHttpAction_(request) {
   if (action === "letters.update") return apiUpdateLetter(request.sessionToken, payload.id, payload);
   if (action === "letters.delete") return apiDeleteLetter(request.sessionToken, payload.id);
 
+  // User management actions — require admin session (enforced inside each function).
+  if (action === "users.list") return apiListUsers(request.sessionToken);
+  if (action === "users.create") return apiCreateUser(request.sessionToken, payload);
+  if (action === "users.update") return apiUpdateUser(request.sessionToken, payload.username, payload);
+  if (action === "users.resetPassword") return apiResetUserPassword(request.sessionToken, payload.username, payload);
+  if (action === "users.delete") return apiDeleteUser(request.sessionToken, payload.username);
+
   // Manifest action: digunakan oleh skrip deploy/verify untuk memastikan deployment
   // aktif mengenali semua aksi. Tidak memerlukan sessionToken, hanya apiSecret
   // (sudah diverifikasi di doPost sebelum dispatcher dipanggil).
@@ -134,11 +168,12 @@ function dispatchHttpAction_(request) {
     supportedActions: [
       "auth.login", "auth.logout", "bootstrap.get",
       "letters.list", "letters.create", "letters.update", "letters.delete",
+      "users.list", "users.create", "users.update", "users.resetPassword", "users.delete",
       "system.manifest"
     ]
   };
 
-  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal: " + action + ". GAS backend v" + GAS_BACKEND_VERSION + " mendukung: auth.login, auth.logout, bootstrap.get, letters.list, letters.create, letters.update, letters.delete, system.manifest.");
+  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal: " + action + ". GAS backend v" + GAS_BACKEND_VERSION + " mendukung: auth.login, auth.logout, bootstrap.get, letters.list, letters.create, letters.update, letters.delete, users.list, users.create, users.update, users.resetPassword, users.delete, system.manifest.");
 }
 
 function login_(credentials) {
@@ -148,29 +183,66 @@ function login_(credentials) {
     return { status: "error", errorCode: "INVALID_CREDENTIALS", errorMsg: "Username atau password tidak valid." };
   }
 
-  var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.USERS);
-  if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Master_User tidak ditemukan.");
+  var rows;
+  try {
+    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.USERS);
+    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Master_User tidak ditemukan.");
+    rows = sheet.getDataRange().getDisplayValues();
+  } catch (lookupError) {
+    // Preserve fail-closed throttling when Script Properties/config lookup is down.
+    var degradedAttempt = consumeLoginAttempt_("__unknown_username_bucket__");
+    if (!degradedAttempt.allowed) {
+      return { status: "error", errorCode: "INVALID_CREDENTIALS", errorMsg: "Username atau password tidak valid." };
+    }
+    throw lookupError;
+  }
+  var matchedRow = null;
+  for (var rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+    if (String(rows[rowIndex][0] || "").trim() === username) {
+      matchedRow = rows[rowIndex];
+      break;
+    }
+  }
 
-  var rows = sheet.getDataRange().getDisplayValues();
-  for (var i = 1; i < rows.length; i++) {
-    var storedUsername = String(rows[i][0] || "").trim();
-    if (storedUsername !== username) continue;
+  // Unknown usernames share one bounded bucket. This prevents attacker-controlled
+  // random names from filling the persistent state and denying known accounts.
+  var throttleIdentity = matchedRow ? username : "__unknown_username_bucket__";
 
-    if (!verifyPassword_(password, String(rows[i][1] || ""))) break;
+  // Atomic consume: acquire throttle lock, read count, reject if >= max, THEN
+  // increment (reserve) before releasing the lock. This means each login attempt
+  // consumes one slot before the password is verified, so concurrent requests
+  // cannot race past the limit. On successful login the counter is cleared.
+  var consumed = consumeLoginAttempt_(throttleIdentity);
+  if (!consumed.allowed) {
+    // Keep public failure identical to bad credentials to prevent account enumeration.
+    return { status: "error", errorCode: "INVALID_CREDENTIALS", errorMsg: "Username atau password tidak valid." };
+  }
 
+  if (matchedRow) {
+    var storedUsername = String(matchedRow[0] || "").trim();
+    if (verifyPassword_(password, String(matchedRow[1] || ""))) {
+
+    // Login successful — clear throttle counter (the reserved slot is freed).
+    clearLoginThrottle_(throttleIdentity);
+
+    var hakAkses = normalizeHakAkses_(cleanText_(matchedRow[3], 50)) || "pengelola";
     var user = {
       username: storedUsername,
-      namaLengkap: cleanText_(rows[i][2], 160) || storedUsername,
-      hakAkses: cleanText_(rows[i][3], 50).toLowerCase() || "pengelola"
+      namaLengkap: cleanText_(matchedRow[2], 160) || storedUsername,
+      hakAkses: hakAkses,
+      sv: computeSessionVersion_(String(matchedRow[1] || ""), hakAkses)
     };
     return {
       status: "success",
       sessionToken: createSessionToken_(user),
       expiresIn: SESSION_TTL_SECONDS_,
-      user: user
+      user: { username: user.username, namaLengkap: user.namaLengkap, hakAkses: user.hakAkses }
     };
+    }
   }
 
+  // Login failed — slot was already consumed/incremented in consumeLoginAttempt_.
+  // Do NOT call recordLoginFailure_ here to avoid double-increment.
   return { status: "error", errorCode: "INVALID_CREDENTIALS", errorMsg: "Username atau password tidak valid." };
 }
 
@@ -179,12 +251,17 @@ function verifyPassword_(password, storedPassword) {
   if (stored.indexOf("sha256$") === 0) {
     var parts = stored.split("$");
     if (parts.length !== 3) return false;
-    var pepper = getScriptProperties_().getProperty(CONFIG_KEYS_.PASSWORD_PEPPER) || "";
+    var pepper = getScriptProperties_().getProperty(CONFIG_KEYS_.PASSWORD_PEPPER);
+    // Pepper is mandatory for hashed passwords. Missing pepper is a configuration
+    // error that must surface explicitly — silently using "" would allow bypass.
+    if (!pepper) throw appError_("CONFIG_ERROR", "PASSWORD_PEPPER belum dikonfigurasi. Hubungi administrator sistem.");
     var candidate = sha256Hex_(parts[1] + password + pepper);
     return constantTimeEquals_(candidate, parts[2].toLowerCase());
   }
 
-  // Compatibility for existing Master_User rows. Migrate with hashMasterUserPasswords().
+  // Plaintext compatibility path for legacy Master_User rows that have not yet
+  // been migrated with hashMasterUserPasswords(). After migration all rows are
+  // sha256$salt$hash and this branch is never reached.
   return constantTimeEquals_(password, stored);
 }
 
@@ -283,6 +360,9 @@ function createLetter_(payload, session) {
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(30000);
+    // TOCTOU: re-validate actor inside the letter lock before any mutation.
+    revalidateActorInLock_(session);
+
     var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
     if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
     validateLetterSheet_(sheet);
@@ -305,13 +385,16 @@ function createLetter_(payload, session) {
 function deleteLetter_(id, session) {
   var recordId = validateLetterId_(id);
   if (!recordId) throw appError_("VALIDATION_ERROR", "ID surat tidak valid.");
-  if (session.hakAkses !== "admin") {
-    throw appError_("FORBIDDEN", "Hanya administrator yang dapat menghapus arsip.");
-  }
 
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(30000);
+    // TOCTOU: re-validate actor inside the lock. Also get live role for delete authorization.
+    var liveRole = revalidateActorInLock_(session);
+    if (liveRole !== "admin") {
+      throw appError_("FORBIDDEN", "Hanya administrator yang dapat menghapus arsip.");
+    }
+
     var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
     if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
     var lastRow = sheet.getLastRow();
@@ -350,6 +433,9 @@ function updateLetter_(id, payload, session) {
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(30000);
+    // TOCTOU: re-validate actor inside the letter lock before any mutation.
+    revalidateActorInLock_(session);
+
     var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
     if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
     validateLetterSheet_(sheet);
@@ -472,6 +558,10 @@ function createSessionToken_(user) {
     exp: now + SESSION_TTL_SECONDS_,
     nonce: Utilities.getUuid()
   };
+  // Embed credential version when provided by login_. sv is a short derived
+  // fingerprint of the stored password hash + role — it does NOT expose the
+  // stored password. Users.* operations verify sv against the live sheet row.
+  if (user.sv) payload.sv = user.sv;
   var encoded = base64UrlEncode_(JSON.stringify(payload));
   return encoded + "." + signValue_(encoded);
 }
@@ -491,6 +581,370 @@ function requireSession_(token) {
     throw appError_("SESSION_EXPIRED", "Sesi telah berakhir. Silakan login kembali.");
   }
   return payload;
+}
+
+/**
+ * requireCurrentSession_ — unified live-session gate for all authenticated endpoints.
+ *
+ * Steps:
+ *   1. Validate token signature and expiry (requireSession_).
+ *   2. Require sv field — tokens without sv (issued before v2.3+) are rejected.
+ *   3. Open Master_User, validateUserSheet_, find actor row.
+ *   4. Verify actor account still exists.
+ *   5. Verify sv matches current credential state (storedPassword + role fingerprint).
+ *      This detects stale tokens after password reset, role change, or deletion.
+ *   6. If requireAdmin=true: verify current live role is "admin" (not just token role).
+ *
+ * Returns the decoded session payload enriched with liveRole and liveNama from sheet.
+ *
+ * Used by ALL authenticated actions: letters.* and users.*
+ * letters.* pass requireAdmin=false; users.* pass requireAdmin=true.
+ */
+function requireCurrentSession_(token, requireAdmin) {
+  var session = requireSession_(token);
+
+  // sv mandatory for all authenticated endpoints post-v2.4.
+  // Tokens without sv were issued by an older deployment and must re-login.
+  if (!session.sv) {
+    throw appError_("AUTH_REQUIRED", "Sesi tidak memiliki versi credential. Silakan login ulang.");
+  }
+
+  var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.USERS);
+  if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Master_User tidak ditemukan.");
+  validateUserSheet_(sheet);
+
+  var rows = sheet.getDataRange().getDisplayValues();
+  var rowIdx = findUserRowIndex_(rows, session.username);
+  if (rowIdx === -1) {
+    throw appError_("AUTH_REQUIRED", "Akun tidak ditemukan. Silakan login kembali.");
+  }
+
+  var currentRole = normalizeHakAkses_(String(rows[rowIdx][3] || "")) || "pengelola";
+  var currentSv = computeSessionVersion_(String(rows[rowIdx][1] || ""), currentRole);
+  if (!constantTimeEquals_(session.sv, currentSv)) {
+    throw appError_("AUTH_REQUIRED", "Sesi tidak lagi valid. Silakan login kembali.");
+  }
+
+  if (requireAdmin && currentRole !== "admin") {
+    throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+  }
+
+  // Return enriched payload with live values so callers see current state.
+  session.liveRole = currentRole;
+  session.liveNama = String(rows[rowIdx][2] || "").trim() || session.username;
+  // Expose live sheet rows for TOCTOU-safe callers that need to act inside lock.
+  session._actorRowIdx = rowIdx;
+  session._liveRows = rows;
+  session._liveSheet = sheet;
+  return session;
+}
+
+/**
+ * requireAdminSession_ is kept as an alias for backward compatibility with
+ * any direct call sites that remain. It delegates to requireCurrentSession_.
+ */
+function requireAdminSession_(token) {
+  return requireCurrentSession_(token, true);
+}
+
+/**
+ * Computes a short deterministic session-version fingerprint from the stored
+ * password/hash string and the canonical role. Used to bind a token to the
+ * credential state at login time.
+ *
+ * The fingerprint is the first 16 hex chars of SHA-256(storedPassword + "|" + role).
+ * This is NOT the password hash itself: the stored value going in is already
+ * "sha256$salt$hash" (or a plaintext legacy value), so the fingerprint cannot
+ * be used to verify passwords. It merely lets the server detect that a credential
+ * mutation (password reset, role change) has occurred since the token was issued.
+ *
+ * The role component ensures that a role downgrade is also detectable.
+ */
+function computeSessionVersion_(storedPasswordField, canonicalRole) {
+  return sha256Hex_(storedPasswordField + "|" + String(canonicalRole || "")).substring(0, 16);
+}
+
+// ─── Login Throttle (ScriptLock-protected, bounded persistent state) ────────
+//
+// Architecture:
+//   Authoritative store: one bounded JSON value in Script Properties.
+//   CacheService is only a best-effort read-through optimization.
+//   Concurrency   : Every read-modify-write on the counter is wrapped in a
+//     ScriptLock (separate from the user-mutation lock) to prevent races.
+//     The lock is ONLY acquired for throttle operations, never held simultaneously
+//     with the user-mutation lock, avoiding deadlock.
+//
+// Failure policy:
+//   - CacheService AND PropertiesService unavailable → fail-closed: treat as
+//     throttled (TOO_MANY_ATTEMPTS). Availability impact is bounded: users may
+//     attempt login again after any GAS execution completes the lock.
+//   - Individual cache/property read errors inside a locked section → still
+//     fail-closed for that attempt; the next attempt re-tries normally.
+//
+// Usernames are stored only as sha256Hex(username).substring(0,32) prefixed "lt_".
+
+var THROTTLE_MAX_ATTEMPTS_ = 5;
+var THROTTLE_WINDOW_SECONDS_ = 5 * 60; // 5-minute window, resets on success
+var THROTTLE_STATE_PROPERTY_ = "LOGIN_THROTTLE_STATE_V1";
+var THROTTLE_MAX_ENTRIES_ = 200;
+
+function throttleCacheKey_(username) {
+  return "lt_" + sha256Hex_(String(username || "")).substring(0, 32);
+}
+
+function throttlePropCountKey_(hashed) {
+  return hashed; // compatibility helper retained for existing diagnostics/tests
+}
+
+function throttlePropTtlKey_(hashed) {
+  return "ltt_" + hashed; // compatibility helper; no longer persisted per user
+}
+
+/**
+ * Gets the ScriptLock for throttle operations.
+ * Returns null if LockService is unavailable or getScriptLock throws.
+ * Callers must treat null as "lock unavailable" and apply fail-closed policy.
+ */
+function getThrottleLock_() {
+  try {
+    if (!LockService || !LockService.getScriptLock) return null;
+    return LockService.getScriptLock();
+  } catch (e) {
+    return null;
+  }
+}
+
+function getThrottleCache_() {
+  try {
+    return CacheService && CacheService.getScriptCache ? CacheService.getScriptCache() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function loadThrottleState_() {
+  var props = getScriptProperties_();
+  var raw = props.getProperty(THROTTLE_STATE_PROPERTY_);
+  var state = {};
+  if (raw) {
+    try {
+      state = JSON.parse(raw);
+    } catch (e) {
+      throw appError_("CONFIG_ERROR", "State login throttle rusak.");
+    }
+    if (!state || typeof state !== "object" || Array.isArray(state)) {
+      throw appError_("CONFIG_ERROR", "State login throttle tidak valid.");
+    }
+  }
+
+  var now = Date.now();
+  var changed = false;
+  Object.keys(state).forEach(function (entryKey) {
+    var entry = state[entryKey];
+    if (!/^lt_[a-f0-9]{32}$/.test(entryKey) || !entry ||
+        !isFinite(Number(entry.count)) || Number(entry.count) < 0 ||
+        !isFinite(Number(entry.expiresAt)) || Number(entry.expiresAt) <= now) {
+      delete state[entryKey];
+      changed = true;
+    }
+  });
+  if (Object.keys(state).length > THROTTLE_MAX_ENTRIES_) {
+    throw appError_("CONFIG_ERROR", "State login throttle melebihi batas aman.");
+  }
+  return { props: props, state: state, changed: changed };
+}
+
+function persistThrottleState_(loaded) {
+  try {
+    var keys = Object.keys(loaded.state);
+    if (keys.length === 0) loaded.props.deleteProperty(THROTTLE_STATE_PROPERTY_);
+    else loaded.props.setProperty(THROTTLE_STATE_PROPERTY_, JSON.stringify(loaded.state));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** Reads the target counter after globally removing expired entries. */
+function readThrottleCount_(key) {
+  try {
+    var loaded = loadThrottleState_();
+    if (loaded.changed && !persistThrottleState_(loaded)) {
+      return { count: THROTTLE_MAX_ATTEMPTS_, source: "error" };
+    }
+    var entry = loaded.state[key];
+    if (!entry) return { count: 0, source: "none" };
+    var count = Number(entry.count);
+    var cache = getThrottleCache_();
+    if (cache) {
+      try {
+        var remainingSeconds = Math.max(1, Math.ceil((Number(entry.expiresAt) - Date.now()) / 1000));
+        cache.put(key, String(count), remainingSeconds);
+      } catch (_) {}
+    }
+    return { count: count, source: "props" };
+  } catch (e) {
+    return { count: THROTTLE_MAX_ATTEMPTS_, source: "error" };
+  }
+}
+
+/**
+ * Writes the updated count atomically inside a lock.
+ * Returns true only after the authoritative Properties write succeeds.
+ * Caller must already hold the throttle lock.
+ *
+ * Properties partial-write safety: if the count key write succeeds but the TTL
+ * key write fails, the count key is deleted to prevent a stale entry with no
+ * expiry being read as a valid non-zero count on the next request.
+ */
+function writeThrottleCount_(key, count) {
+  try {
+    var loaded = loadThrottleState_();
+    // Never evict an active account counter for an attacker-controlled new key.
+    // When the bounded state is full, new usernames fail closed until an entry
+    // expires or a successful login clears its own counter.
+    if (!loaded.state[key] && Object.keys(loaded.state).length >= THROTTLE_MAX_ENTRIES_) {
+      return false;
+    }
+    loaded.state[key] = {
+      count: Number(count),
+      expiresAt: Date.now() + THROTTLE_WINDOW_SECONDS_ * 1000
+    };
+    if (!persistThrottleState_(loaded)) return false;
+
+    // Cache is read-through only. Its failure cannot invalidate persistence.
+    var cache = getThrottleCache_();
+    if (cache) {
+      try { cache.put(key, String(count), THROTTLE_WINDOW_SECONDS_); } catch (_) {}
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Clears throttle state from both stores. Caller must hold throttle lock.
+ */
+function clearThrottleCount_(key) {
+  var cache = getThrottleCache_();
+  if (cache) { try { cache.remove(key); } catch (e) {} }
+  try {
+    var loaded = loadThrottleState_();
+    delete loaded.state[key];
+    persistThrottleState_(loaded);
+  } catch (e) {}
+}
+
+function isLoginThrottled_(username) {
+  var key = throttleCacheKey_(username);
+  var lock = getThrottleLock_();
+  if (lock) {
+    try {
+      lock.waitLock(5000);
+    } catch (e) {
+      // Could not acquire lock — fail-closed.
+      return true;
+    }
+  }
+  try {
+    return readThrottleCount_(key).count >= THROTTLE_MAX_ATTEMPTS_;
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function recordLoginFailure_(username) {
+  var key = throttleCacheKey_(username);
+  var lock = getThrottleLock_();
+  if (lock) {
+    try {
+      lock.waitLock(5000);
+    } catch (e) {
+      // Could not acquire lock — still record best-effort without lock.
+    }
+  }
+  try {
+    var result = readThrottleCount_(key);
+    if (result.source !== "error") {
+      writeThrottleCount_(key, result.count + 1);
+    }
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function clearLoginThrottle_(username) {
+  var key = throttleCacheKey_(username);
+  var lock = getThrottleLock_();
+  if (lock) {
+    try {
+      lock.waitLock(5000);
+    } catch (e) {
+      // Best-effort.
+    }
+  }
+  try {
+    clearThrottleCount_(key);
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
+/**
+ * consumeLoginAttempt_ — atomic read-check-increment for login throttle.
+ *
+ * Fail-closed policy (returns {allowed:false}) when:
+ *   - getThrottleLock_() returns null (LockService unavailable or throws)
+ *   - lock.waitLock() throws (cannot acquire within timeout)
+ *   - readThrottleCount_ returns source:"error" (both stores failed on read)
+ *   - count >= THROTTLE_MAX_ATTEMPTS_ (rate limit reached)
+ *   - writeThrottleCount_() returns false (reservation could not be persisted)
+ *
+ * The write-failure case is critical: if we allowed the attempt without a
+ * successful write, concurrent requests could all read count=0 (stores
+ * degraded but readable) and all proceed to password verification — defeating
+ * the rate limit. Fail-closed on write ensures the limit is enforced.
+ *
+ * On successful login, clearLoginThrottle_() frees the reserved slot.
+ * On failed login, the slot remains consumed — login_ must NOT call
+ * recordLoginFailure_ afterwards (no double-increment).
+ */
+function consumeLoginAttempt_(username) {
+  var key = throttleCacheKey_(username);
+  var lock = getThrottleLock_();
+
+  // Lock unavailable → cannot guarantee atomicity → fail-closed.
+  if (!lock) {
+    return { allowed: false };
+  }
+
+  try {
+    lock.waitLock(5000);
+  } catch (e) {
+    // Cannot acquire lock — fail-closed.
+    return { allowed: false };
+  }
+
+  try {
+    var result = readThrottleCount_(key);
+    if (result.source === "error") {
+      // Both stores unavailable on read — fail-closed.
+      return { allowed: false };
+    }
+    if (result.count >= THROTTLE_MAX_ATTEMPTS_) {
+      return { allowed: false };
+    }
+    // Reserve the slot by incrementing now, before password verification.
+    // If the write fails, do not allow the attempt — fail-closed.
+    var written = writeThrottleCount_(key, result.count + 1);
+    if (!written) {
+      return { allowed: false };
+    }
+    return { allowed: true };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
 }
 
 function signValue_(value) {
@@ -644,8 +1098,392 @@ function appError_(code, message) {
 function publicErrorMessage_(error) {
   var allowed = [
     "BAD_REQUEST", "PAYLOAD_TOO_LARGE", "ACTION_NOT_FOUND", "VALIDATION_ERROR", "AUTH_REQUIRED",
-    "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR"
+    "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR",
+    "DUPLICATE_USER", "NOT_FOUND", "LAST_ADMIN_PROTECTED", "TOO_MANY_ATTEMPTS"
   ];
   if (error && allowed.indexOf(error.code) !== -1) return error.message;
   return "Layanan sedang mengalami kendala. Silakan coba kembali.";
+}
+
+// ─── User Management Domain Logic ──────────────────────────────────────────
+
+/**
+ * Normalises hakAkses: "administrator" → "admin"; only "admin" and "pengelola" are valid.
+ * Returns the normalised value or null if invalid.
+ */
+function normalizeHakAkses_(raw) {
+  var v = cleanText_(raw, 50).toLowerCase();
+  if (v === "administrator") return "admin";
+  if (v === "admin" || v === "pengelola") return v;
+  return null;
+}
+
+/**
+ * revalidateActorInLock_ — re-reads Master_User inside an already-held lock and
+ * verifies that the actor's account still exists, the sv still matches the live
+ * credential state, and the actor still has the minimum required role.
+ *
+ * Called by letter create/update/delete AND user mutations so that a concurrent
+ * execution that deletes or downgrades the actor between requireCurrentSession_
+ * and the lock acquisition cannot sneak through.
+ *
+ * IMPORTANT: This function reads the Master_User sheet, not the letters sheet.
+ * The caller holds a ScriptLock, so this read is protected from concurrent
+ * writes to Master_User. There is no nested lock.
+ *
+ * Returns the live canonical role ("admin" or "pengelola") so callers can use
+ * it for authorization decisions (e.g. deleteLetter_ checks role === "admin").
+ *
+ * Throws AUTH_REQUIRED if the account is gone or sv mismatches.
+ * Throws FORBIDDEN if requireAdmin=true and live role is not "admin".
+ */
+function revalidateActorInLock_(session, requireAdmin) {
+  var userSheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.USERS);
+  if (!userSheet) throw appError_("CONFIG_ERROR", "Sheet Master_User tidak ditemukan.");
+  validateUserSheet_(userSheet);
+
+  var rows = userSheet.getDataRange().getDisplayValues();
+  var rowIdx = findUserRowIndex_(rows, session.username);
+  if (rowIdx === -1) {
+    throw appError_("AUTH_REQUIRED", "Akun tidak ditemukan. Silakan login kembali.");
+  }
+
+  var liveRole = normalizeHakAkses_(String(rows[rowIdx][3] || "")) || "pengelola";
+  var liveSv = computeSessionVersion_(String(rows[rowIdx][1] || ""), liveRole);
+  if (!constantTimeEquals_(session.sv, liveSv)) {
+    throw appError_("AUTH_REQUIRED", "Sesi tidak lagi valid. Silakan login kembali.");
+  }
+
+  if (requireAdmin && liveRole !== "admin") {
+    throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+  }
+
+  return liveRole;
+}
+
+/**
+ * Returns true when the session role is admin (or administrator, normalised).
+ */
+function isAdmin_(session) {
+  return normalizeHakAkses_(session.hakAkses) === "admin";
+}
+
+/**
+ * Validates a NEW username (create): strict charset, 1–64 chars, no truncation.
+ * Does NOT call cleanText_ (which truncates); validates the raw trimmed value.
+ * Returns the trimmed username on success, or null if invalid.
+ */
+function validateUsername_(raw) {
+  var u = String(raw == null ? "" : raw).trim();
+  // Reject empty, oversized, or oversized-before-trim to avoid silent truncation.
+  if (!u || u.length > 64) return null;
+  // Must start with letter or digit; only word chars, dot, hyphen allowed.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._\-]*$/.test(u)) return null;
+  return u;
+}
+
+/**
+ * Validates a TARGET username for update/resetPassword/delete operations.
+ * More permissive than validateUsername_ to accommodate legacy usernames that
+ * may contain spaces or other characters outside the strict create-charset.
+ * Rules:
+ *   - Trim whitespace; reject control characters (ASCII 0-31).
+ *   - Reject empty or length > 100.
+ *   - URL always wins over body (enforced in the gateway/dispatcher, not here).
+ * Returns the trimmed username on success, or null if invalid.
+ */
+function validateUsernameTarget_(raw) {
+  var u = String(raw == null ? "" : raw).trim();
+  if (!u || u.length > 100) return null;
+  // Reject control characters.
+  if (/[\x00-\x1F]/.test(u)) return null;
+  return u;
+}
+
+/**
+ * Validates that the Master_User sheet has at least 4 columns and that the
+ * header row (row 1) contains recognisable column identifiers in positions A–D.
+ * Accepted header values (case-insensitive, trimmed):
+ *   Col A: username
+ *   Col B: password (legacy: "password", "hash", "kata sandi")
+ *   Col C: namaLengkap (legacy: "nama lengkap", "nama", "nama_lengkap")
+ *   Col D: hakAkses   (legacy: "hak akses", "hak_akses", "role", "akses")
+ *
+ * Throws SCHEMA_ERROR if the sheet is structurally invalid.
+ * A sheet with only a header row (no data) is valid; it just has 0 users.
+ */
+function validateUserSheet_(sheet) {
+  if (sheet.getMaxColumns() < 4) {
+    throw appError_("SCHEMA_ERROR", "Master_User harus memiliki minimal 4 kolom (A: username, B: password, C: namaLengkap, D: hakAkses).");
+  }
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) {
+    throw appError_("SCHEMA_ERROR", "Master_User tidak memiliki baris header.");
+  }
+  var header = sheet.getRange(1, 1, 1, 4).getDisplayValues()[0];
+
+  function matchHeader(cell, accepted) {
+    var v = String(cell || "").trim().toLowerCase().replace(/[\s_]/g, "");
+    for (var i = 0; i < accepted.length; i++) {
+      if (v === accepted[i]) return true;
+    }
+    return false;
+  }
+
+  if (!matchHeader(header[0], ["username", "user", "namapengguna"])) {
+    throw appError_("SCHEMA_ERROR", "Kolom A Master_User harus berheader 'username'.");
+  }
+  if (!matchHeader(header[1], ["password", "hash", "katasandi", "passwordhash"])) {
+    throw appError_("SCHEMA_ERROR", "Kolom B Master_User harus berheader 'password' atau 'hash'.");
+  }
+  if (!matchHeader(header[2], ["namalengkap", "nama", "namalengkap", "fulname", "fullname"])) {
+    throw appError_("SCHEMA_ERROR", "Kolom C Master_User harus berheader 'namaLengkap' atau 'nama'.");
+  }
+  if (!matchHeader(header[3], ["hakakses", "role", "akses", "access", "hak"])) {
+    throw appError_("SCHEMA_ERROR", "Kolom D Master_User harus berheader 'hakAkses' atau 'role'.");
+  }
+}
+
+/**
+ * Reads and validates the Master_User sheet, returning the sheet object.
+ */
+function getUserSheet_() {
+  var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.USERS);
+  if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Master_User tidak ditemukan.");
+  validateUserSheet_(sheet);
+  return sheet;
+}
+
+/**
+ * Hashes a password using sha256$salt$hash format with PASSWORD_PEPPER.
+ * Format: "sha256$<32-hex-salt>$<64-hex-sha256-of-salt+password+pepper>"
+ * The existing KDF is retained for compatibility. New rows always use this format.
+ * Throws CONFIG_ERROR if pepper is not set.
+ */
+function hashPassword_(password) {
+  var pepper = getScriptProperties_().getProperty(CONFIG_KEYS_.PASSWORD_PEPPER);
+  if (!pepper) throw appError_("CONFIG_ERROR", "PASSWORD_PEPPER belum dikonfigurasi.");
+  var salt = Utilities.getUuid().replace(/-/g, "");
+  var hash = sha256Hex_(salt + password + pepper);
+  return "sha256$" + salt + "$" + hash;
+}
+
+/**
+ * Finds the row index (0-based in rows array) for a username, case-insensitive.
+ * Returns -1 if not found.
+ */
+function findUserRowIndex_(rows, username) {
+  var needle = String(username || "").trim().toLowerCase();
+  for (var i = 1; i < rows.length; i++) {
+    if (String(rows[i][0] || "").trim().toLowerCase() === needle) return i;
+  }
+  return -1;
+}
+
+/**
+ * Counts admin users in the rows array (normalises "administrator" → "admin").
+ */
+function countAdmins_(rows) {
+  var count = 0;
+  for (var i = 1; i < rows.length; i++) {
+    if (normalizeHakAkses_(String(rows[i][3] || "")) === "admin") count++;
+  }
+  return count;
+}
+
+/**
+ * Converts a sheet row to a safe user object (no password).
+ */
+function rowToUser_(row) {
+  return {
+    username: String(row[0] || "").trim(),
+    namaLengkap: String(row[2] || "").trim(),
+    hakAkses: normalizeHakAkses_(String(row[3] || "")) || "pengelola"
+  };
+}
+
+function listUsers_(session) {
+  // requireAdminSession_ is called in the public wrapper with the raw token.
+  // Here session is already the decoded payload; re-check role for defence-in-depth.
+  if (!isAdmin_(session)) throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+  var sheet = getUserSheet_();
+  var rows = sheet.getDataRange().getDisplayValues();
+  var users = [];
+  for (var i = 1; i < rows.length; i++) {
+    var u = String(rows[i][0] || "").trim();
+    if (!u) continue;
+    users.push(rowToUser_(rows[i]));
+  }
+  return { status: "success", data: users };
+}
+
+function createUser_(payload, session) {
+  if (!isAdmin_(session)) throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+
+  var username = validateUsername_(payload.username);
+  if (!username) throw appError_("VALIDATION_ERROR", "Username tidak valid. Gunakan huruf, angka, titik, underscore, atau strip (mulai dengan huruf/angka, maks 64 karakter).");
+
+  var namaLengkap = cleanText_(payload.namaLengkap, 160);
+  if (!namaLengkap) throw appError_("VALIDATION_ERROR", "Nama lengkap wajib diisi.");
+
+  var hakAkses = normalizeHakAkses_(payload.hakAkses);
+  if (!hakAkses) throw appError_("VALIDATION_ERROR", "Hak akses tidak valid. Nilai yang diterima: admin, pengelola.");
+
+  var password = String(payload.password || "");
+  if (password.length < 8) throw appError_("VALIDATION_ERROR", "Password minimal 8 karakter.");
+  if (password.length > 200) throw appError_("VALIDATION_ERROR", "Password terlalu panjang (maks 200 karakter).");
+
+  var passwordHash = hashPassword_(password);
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    // TOCTOU: re-validate actor with a fresh sheet read inside the lock.
+    revalidateActorInLock_(session, true);
+
+    var sheet = getUserSheet_();
+    var rows = sheet.getDataRange().getDisplayValues();
+
+    if (findUserRowIndex_(rows, username) !== -1) {
+      throw appError_("DUPLICATE_USER", "Username '" + username + "' sudah terdaftar.");
+    }
+
+    var newRow = [
+      safeSheetValue_(username),
+      safeSheetValue_(passwordHash),
+      safeSheetValue_(namaLengkap),
+      safeSheetValue_(hakAkses)
+    ];
+    sheet.appendRow(newRow);
+    SpreadsheetApp.flush();
+
+    console.info("User created", JSON.stringify({ username: username, actor: session.username }));
+    return { status: "success", data: { username: username, namaLengkap: namaLengkap, hakAkses: hakAkses } };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function updateUser_(username, payload, session) {
+  if (!isAdmin_(session)) throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+
+  // Use the permissive target validator to support legacy usernames.
+  var targetUsername = validateUsernameTarget_(username);
+  if (!targetUsername) throw appError_("VALIDATION_ERROR", "Username target tidak valid.");
+
+  var namaLengkap = cleanText_(payload.namaLengkap, 160);
+  if (!namaLengkap) throw appError_("VALIDATION_ERROR", "Nama lengkap wajib diisi.");
+
+  var hakAkses = normalizeHakAkses_(payload.hakAkses);
+  if (!hakAkses) throw appError_("VALIDATION_ERROR", "Hak akses tidak valid. Nilai yang diterima: admin, pengelola.");
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    // TOCTOU: fresh actor re-validation inside lock.
+    revalidateActorInLock_(session, true);
+
+    var sheet = getUserSheet_();
+    var rows = sheet.getDataRange().getDisplayValues();
+    var rowIdx = findUserRowIndex_(rows, targetUsername);
+    if (rowIdx === -1) throw appError_("NOT_FOUND", "Pengguna '" + targetUsername + "' tidak ditemukan.");
+
+    // Protect last admin from role downgrade.
+    var currentHakAkses = normalizeHakAkses_(String(rows[rowIdx][3] || "")) || "pengelola";
+    if (currentHakAkses === "admin" && hakAkses !== "admin") {
+      if (countAdmins_(rows) <= 1) {
+        throw appError_("LAST_ADMIN_PROTECTED", "Tidak dapat menurunkan hak akses admin terakhir.");
+      }
+    }
+
+    // Reject self role downgrade.
+    if (String(targetUsername).toLowerCase() === String(session.username || "").toLowerCase() &&
+        currentHakAkses === "admin" && hakAkses !== "admin") {
+      throw appError_("FORBIDDEN", "Tidak dapat menurunkan hak akses diri sendiri.");
+    }
+
+    var sheetRow = rowIdx + 1; // 1-based
+    // Update col C (namaLengkap = index 2) and col D (hakAkses = index 3), preserve A and B.
+    sheet.getRange(sheetRow, 3, 1, 2).setValues([[safeSheetValue_(namaLengkap), safeSheetValue_(hakAkses)]]);
+    SpreadsheetApp.flush();
+
+    console.info("User updated", JSON.stringify({ username: targetUsername, actor: session.username }));
+    return { status: "success", data: { username: targetUsername, namaLengkap: namaLengkap, hakAkses: hakAkses } };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function resetUserPassword_(username, payload, session) {
+  if (!isAdmin_(session)) throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+
+  var targetUsername = validateUsernameTarget_(username);
+  if (!targetUsername) throw appError_("VALIDATION_ERROR", "Username target tidak valid.");
+
+  var newPassword = String(payload.newPassword || "");
+  if (newPassword.length < 8) throw appError_("VALIDATION_ERROR", "Password minimal 8 karakter.");
+  if (newPassword.length > 200) throw appError_("VALIDATION_ERROR", "Password terlalu panjang (maks 200 karakter).");
+
+  var passwordHash = hashPassword_(newPassword);
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    // TOCTOU: fresh actor re-validation inside lock.
+    revalidateActorInLock_(session, true);
+
+    var sheet = getUserSheet_();
+    var rows = sheet.getDataRange().getDisplayValues();
+    var rowIdx = findUserRowIndex_(rows, targetUsername);
+    if (rowIdx === -1) throw appError_("NOT_FOUND", "Pengguna '" + targetUsername + "' tidak ditemukan.");
+
+    var sheetRow = rowIdx + 1;
+    // Update col B (password = index 1) only.
+    sheet.getRange(sheetRow, 2, 1, 1).setValues([[safeSheetValue_(passwordHash)]]);
+    SpreadsheetApp.flush();
+
+    console.info("User password reset", JSON.stringify({ username: targetUsername, actor: session.username }));
+    return { status: "success", username: targetUsername };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function deleteUser_(username, session) {
+  if (!isAdmin_(session)) throw appError_("FORBIDDEN", "Hanya administrator yang dapat mengelola pengguna.");
+
+  var targetUsername = validateUsernameTarget_(username);
+  if (!targetUsername) throw appError_("VALIDATION_ERROR", "Username target tidak valid.");
+
+  // Reject self-delete (quick check before acquiring lock).
+  if (String(targetUsername).toLowerCase() === String(session.username || "").toLowerCase()) {
+    throw appError_("FORBIDDEN", "Tidak dapat menghapus akun yang sedang digunakan.");
+  }
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    // TOCTOU: fresh actor re-validation inside lock.
+    revalidateActorInLock_(session, true);
+
+    var sheet = getUserSheet_();
+    var rows = sheet.getDataRange().getDisplayValues();
+    var rowIdx = findUserRowIndex_(rows, targetUsername);
+    if (rowIdx === -1) throw appError_("NOT_FOUND", "Pengguna '" + targetUsername + "' tidak ditemukan.");
+
+    // Protect last admin from deletion.
+    var targetHakAkses = normalizeHakAkses_(String(rows[rowIdx][3] || "")) || "pengelola";
+    if (targetHakAkses === "admin" && countAdmins_(rows) <= 1) {
+      throw appError_("LAST_ADMIN_PROTECTED", "Tidak dapat menghapus admin terakhir.");
+    }
+
+    var sheetRow = rowIdx + 1;
+    sheet.deleteRow(sheetRow);
+    SpreadsheetApp.flush();
+
+    console.info("User deleted", JSON.stringify({ username: targetUsername, actor: session.username }));
+    return { status: "success", username: targetUsername };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
 }

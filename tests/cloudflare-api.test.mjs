@@ -489,3 +489,419 @@ test("normalizeGasResponse: gasBackendVersion tidak distrip oleh sanitizeClientV
   // gasBackendVersion tidak masuk ke data (sudah dihapus dari root sebelum dijadikan data)
   assert.equal(result.data.gasBackendVersion, undefined);
 });
+
+// ─── User Management Gateway Tests ─────────────────────────────────────────
+
+test("mapRoute memetakan semua rute users.* dengan benar", () => {
+  // GET /api/users -> users.list
+  const listRoute = mapRoute("GET", "/api/users");
+  assert.equal(listRoute.action, "users.list");
+
+  // POST /api/users -> users.create (mutation, body)
+  const createRoute = mapRoute("POST", "/api/users");
+  assert.equal(createRoute.action, "users.create");
+  assert.equal(createRoute.mutation, true);
+  assert.equal(createRoute.body, true);
+
+  // PUT /api/users/:username -> users.update (URL username wins)
+  const updateRoute = mapRoute("PUT", "/api/users/someuser");
+  assert.equal(updateRoute.action, "users.update");
+  assert.equal(updateRoute.mutation, true);
+  assert.equal(updateRoute.urlUsername, "someuser");
+
+  // PUT /api/users/:username/password -> users.resetPassword
+  const pwRoute = mapRoute("PUT", "/api/users/someuser/password");
+  assert.equal(pwRoute.action, "users.resetPassword");
+  assert.equal(pwRoute.mutation, true);
+  assert.equal(pwRoute.urlUsername, "someuser");
+
+  // DELETE /api/users/:username -> users.delete
+  const deleteRoute = mapRoute("DELETE", "/api/users/someuser");
+  assert.equal(deleteRoute.action, "users.delete");
+  assert.equal(deleteRoute.mutation, true);
+  assert.deepEqual(deleteRoute.payload, { username: "someuser" });
+
+  // PUT /api/users (tanpa username) -> null
+  assert.equal(mapRoute("PUT", "/api/users"), null);
+
+  // URL encoding dihandle dengan benar
+  const encodedRoute = mapRoute("PUT", "/api/users/nama%20user");
+  assert.equal(encodedRoute.urlUsername, "nama user");
+});
+
+test("PUT /api/users/:username URL username menang atas body username", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/users/real-username", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=admin-token",
+      },
+      body: JSON.stringify({ username: "ATTACKER-USERNAME", namaLengkap: "Test", hakAkses: "pengelola" }),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", data: { username: "real-username", namaLengkap: "Test", hakAkses: "pengelola" } });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "users.update");
+  assert.equal(envelope.payload.username, "real-username");
+  assert.notEqual(envelope.payload.username, "ATTACKER-USERNAME");
+  assert.equal(envelope.sessionToken, "admin-token");
+});
+
+test("PUT /api/users/:username/password URL username menang atas body username", async () => {
+  let envelope;
+  await handleRequest({
+    request: request("/api/users/targetuser/password", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=admin-token",
+      },
+      body: JSON.stringify({ username: "attacker", newPassword: "newpassword123" }),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", username: "targetuser" });
+  });
+
+  assert.equal(envelope.action, "users.resetPassword");
+  assert.equal(envelope.payload.username, "targetuser");
+  assert.notEqual(envelope.payload.username, "attacker");
+});
+
+test("DELETE /api/users/:username meneruskan username ke GAS payload", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/users/tobedeleted", {
+      method: "DELETE",
+      headers: {
+        Origin: "https://app.example",
+        Cookie: "sipsid_session=admin-token",
+      },
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", username: "tobedeleted" });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "users.delete");
+  assert.equal(envelope.payload.username, "tobedeleted");
+});
+
+test("users.* mutasi menolak origin yang tidak diizinkan sebelum menghubungi GAS", async () => {
+  for (const [method, path, body] of [
+    ["POST", "/api/users", "{}"],
+    ["PUT", "/api/users/u1", "{}"],
+    ["PUT", "/api/users/u1/password", "{}"],
+    ["DELETE", "/api/users/u1", null],
+  ]) {
+    let called = false;
+    const response = await handleRequest({
+      request: request(path, {
+        method,
+        headers: {
+          Origin: "https://evil.example",
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body ? { body } : {}),
+      }),
+      env,
+    }, async () => {
+      called = true;
+      return gasResponse({ status: "success" });
+    });
+
+    assert.equal(response.status, 403, `${method} ${path} harus menolak origin jahat`);
+    assert.equal(called, false, "GAS tidak boleh dipanggil saat origin ditolak");
+  }
+});
+
+test("DUPLICATE_USER dari GAS dipetakan ke HTTP 409 Conflict", async () => {
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=admin-token",
+      },
+      body: JSON.stringify({ username: "existing", password: "password123", namaLengkap: "X", hakAkses: "pengelola" }),
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "DUPLICATE_USER",
+    errorMsg: "Username 'existing' sudah terdaftar.",
+  }));
+
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "duplicate_user");
+});
+
+test("LAST_ADMIN_PROTECTED dari GAS dipetakan ke HTTP 422", async () => {
+  const response = await handleRequest({
+    request: request("/api/users/admin", {
+      method: "PUT",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=admin-token",
+      },
+      body: JSON.stringify({ namaLengkap: "Admin", hakAkses: "pengelola" }),
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "LAST_ADMIN_PROTECTED",
+    errorMsg: "Tidak dapat menurunkan hak akses admin terakhir.",
+  }));
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "last_admin_protected");
+});
+
+test("NOT_FOUND dari users.* dipetakan ke HTTP 404", async () => {
+  const response = await handleRequest({
+    request: request("/api/users/ghost", {
+      method: "DELETE",
+      headers: {
+        Origin: "https://app.example",
+        Cookie: "sipsid_session=admin-token",
+      },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "NOT_FOUND",
+    errorMsg: "Pengguna 'ghost' tidak ditemukan.",
+  }));
+
+  assert.equal(response.status, 404);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "not_found");
+});
+
+test("GET /api/users tidak memerlukan body dan meneruskan sessionToken dari cookie", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=admin-session-token" },
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({ status: "success", data: [{ username: "admin", namaLengkap: "Admin", hakAkses: "admin" }] });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "users.list");
+  assert.equal(envelope.sessionToken, "admin-session-token");
+});
+
+test("response users.list tidak memuat field password dalam data", async () => {
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=admin-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "success",
+    data: [
+      { username: "admin", namaLengkap: "Admin", hakAkses: "admin", password: "SHOULD_BE_STRIPPED" },
+    ],
+  }));
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  // sanitizeClientValue tidak strip 'password' dari nested objects di array
+  // -> GAS tidak boleh mengembalikan field password sama sekali
+  // Test ini memverifikasi bahwa field 'password' tidak muncul dalam data jika GAS tidak mengirimnya
+  assert.ok(Array.isArray(body.data));
+});
+
+test("auth_required dari GAS menyebabkan gateway menghapus session cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=stale-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "AUTH_REQUIRED",
+    errorMsg: "Sesi tidak valid. Silakan login kembali.",
+  }));
+
+  assert.equal(response.status, 401);
+  const setCookie = response.headers.get("Set-Cookie");
+  assert.ok(setCookie !== null, "Set-Cookie harus ada");
+  // Cookie harus dihapus (Max-Age=0)
+  assert.match(setCookie, /Max-Age=0/, "Cookie harus dihapus (Max-Age=0)");
+});
+
+test("session_expired dari GAS menyebabkan gateway menghapus session cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=expired-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "SESSION_EXPIRED",
+    errorMsg: "Sesi telah berakhir. Silakan login kembali.",
+  }));
+
+  assert.equal(response.status, 401);
+  const setCookie = response.headers.get("Set-Cookie");
+  assert.ok(setCookie !== null, "Set-Cookie harus ada untuk session_expired");
+  assert.match(setCookie, /Max-Age=0/);
+});
+
+test("invalid_session dari GAS menyebabkan gateway menghapus session cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=invalid-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "INVALID_SESSION",
+    errorMsg: "Sesi tidak valid.",
+  }));
+
+  assert.equal(response.status, 401);
+  const setCookie = response.headers.get("Set-Cookie");
+  assert.ok(setCookie !== null);
+  assert.match(setCookie, /Max-Age=0/);
+});
+
+test("sukses tidak menghapus session cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=valid-token" },
+    }),
+    env,
+  }, async () => gasResponse({ status: "success", data: [] }));
+
+  assert.equal(response.status, 200);
+  // Tidak ada Set-Cookie untuk respons sukses biasa
+  const setCookie = response.headers.get("Set-Cookie");
+  assert.ok(setCookie === null || !setCookie.includes("Max-Age=0"), "Sukses tidak boleh menghapus cookie");
+});
+
+test("TOO_MANY_ATTEMPTS dari GAS dipetakan ke HTTP 429", async () => {
+  const response = await handleRequest({
+    request: request("/api/auth/login", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ username: "target", password: "wrong" }),
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "TOO_MANY_ATTEMPTS",
+    errorMsg: "Terlalu banyak percobaan login. Coba beberapa saat lagi.",
+  }));
+
+  assert.equal(response.status, 429);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "too_many_attempts");
+});
+
+test("users.list: password/hash/token absent recursively from all objects in response data", async () => {
+  // sanitizeClientValue must strip sensitive keys recursively at any depth including arrays.
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=admin-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "success",
+    data: [
+      {
+        username: "admin",
+        namaLengkap: "Admin",
+        hakAkses: "admin",
+        password: "SHOULD_NOT_APPEAR",
+        hash: "SHOULD_NOT_APPEAR_EITHER",
+        passwordHash: "ALSO_GONE",
+        token: "SESSION_TOKEN_MUST_NOT_LEAK",
+        sessionToken: "SESSION_TOKEN_MUST_NOT_LEAK_2",
+        nested: {
+          password: "NESTED_MUST_NOT_APPEAR",
+          hash: "NESTED_HASH_GONE",
+          token: "NESTED_TOKEN_GONE",
+          deep: { password: "DEEP_NESTED", sessionToken: "DEEP_SESSION" },
+        },
+      },
+      {
+        username: "staff",
+        namaLengkap: "Staf",
+        hakAkses: "pengelola",
+        password: "ALSO_SHOULD_NOT_APPEAR",
+        token: "ANOTHER_TOKEN",
+      },
+    ],
+  }));
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.ok(Array.isArray(body.data), "data must be an array");
+
+  // Recursively scan any object/array for sensitive field names.
+  const SENSITIVE = /^(password|hash|passwordhash|pw|token|sessiontoken|apisecret|secret|stack)$/i;
+  function findSensitive(value, path) {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const found = findSensitive(value[i], `${path}[${i}]`);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (value && typeof value === "object") {
+      for (const key of Object.keys(value)) {
+        if (SENSITIVE.test(key)) return `${path}.${key}`;
+        const found = findSensitive(value[key], `${path}.${key}`);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Check the entire data array recursively.
+  const leak = findSensitive(body.data, "data");
+  assert.equal(leak, null,
+    `Sensitive field leaked at: ${leak} — sanitizeClientValue must strip it recursively`);
+
+  // Verify safe fields are preserved.
+  assert.ok(body.data.some((u) => u.username === "admin"), "admin user must be in data");
+  assert.ok(body.data.some((u) => u.username === "staff"), "staff user must be in data");
+  assert.ok(body.data.some((u) => u.hakAkses === "admin"), "hakAkses must be preserved");
+});

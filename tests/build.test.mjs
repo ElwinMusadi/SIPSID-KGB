@@ -108,6 +108,10 @@ test("verify-gas-deployment.mjs mengarahkan remediation ke 'New version'", async
     "verify:gas harus meminta verifikasi ulang setelah deployment diperbarui");
   assert.doesNotMatch(script, /Pilih version terbaru|pilih versi terbaru/i,
     "verify:gas tidak boleh memakai instruksi versi terbaru yang ambigu");
+  for (const action of ["users.list", "users.create", "users.update", "users.resetPassword", "users.delete"]) {
+    assert.match(script, new RegExp(`"${action.replace(".", "\\.")}"`),
+      `verify:gas harus memeriksa aksi ${action}`);
+  }
 });
 
 test("README menyebut 'New version', verify:gas, dan bahwa clasp push tidak memperbarui /exec", async () => {
