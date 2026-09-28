@@ -1239,6 +1239,22 @@
           return result.ok === true ? result.data : result;
       }
 
+      function getSubmitErrorMessage(error, isEditing) {
+          const fallback = `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`;
+          const message = typeof error?.message === 'string' ? error.message.trim() : '';
+          if (!isEditing) return message || fallback;
+
+          const code = String(error?.code || '').toUpperCase();
+          const isApiVersionMismatch = code === 'ACTION_NOT_FOUND' ||
+              /Aksi API tidak dikenal|Script function not found:\s*apiUpdateLetter/i.test(message);
+          if (isApiVersionMismatch) {
+              const detail = message ? ` Detail layanan: ${message}` : '';
+              return `Versi backend yang aktif belum mendukung pembaruan arsip. Deployment frontend dan backend belum sinkron.${detail}`;
+          }
+
+          return message || fallback;
+      }
+
       const api = {
           async login(credentials) {
               if (isGasRuntime()) {
@@ -1738,7 +1754,7 @@
               .catch(error => {
                   showToast(
                       isEditing ? 'Pembaruan Gagal' : 'Penyimpanan Gagal',
-                      error?.message || `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`,
+                      getSubmitErrorMessage(error, isEditing),
                       false
                   );
                   submitBtn.innerHTML = originalBtnHtml;

@@ -75,7 +75,36 @@ Push:
 npm run push:gas
 ```
 
-Script npm menjalankan build lalu menjalankan `clasp push` dengan folder `gas` sebagai working directory. Untuk menjalankan manual:
+Script npm menjalankan build lalu menjalankan `clasp push` dengan folder `gas` sebagai working directory. **`clasp push` saja tidak memperbarui endpoint produksi `/exec`.** Setelah push, ikuti langkah di bawah.
+
+### Memperbarui deployment GAS setelah push
+
+`clasp push` hanya mengunggah source ke editor sebagai HEAD yang belum punya versi. URL `/exec` yang dikonsumsi Cloudflare tetap melayani versi lama sampai deployment yang sama secara eksplisit diperbarui ke versi baru.
+
+**Langkah wajib setelah setiap `npm run push:gas`:**
+
+1. Buka <https://script.google.com/> → project SIPSID-KGB
+2. Klik **Deploy → Manage deployments**
+3. Temukan deployment produksi (URL-nya sama dengan `GAS_WEB_APP_URL` di Cloudflare) → klik ikon **Edit** (pensil)
+4. Di dropdown **Version**, pilih **New version**
+5. Klik **Deploy** — deployment ID dan URL `/exec` tetap sama; hanya versi aktif yang diperbarui
+6. Verifikasi:
+
+```powershell
+npm run verify:gas
+```
+
+Output yang diharapkan:
+
+```text
+✔ gasBackendVersion: 2.1.0 (sesuai source)
+✔ Semua 8 aksi dikenali oleh deployment aktif
+  VERIFIKASI BERHASIL — Deployment GAS aktif sudah up-to-date.
+```
+
+Jika `verify:gas` melaporkan mismatch versi atau aksi yang tidak dikenali (termasuk `letters.update`), deployment belum aktif — ulangi langkah 3–5.
+
+Untuk menjalankan manual tanpa npm:
 
 ```powershell
 npm run build:gas
@@ -142,25 +171,30 @@ Cloudflare browser hanya memanggil `/api/*`. Pages Functions meneruskan request 
 
 1. Buat salinan Spreadsheet untuk test.
 2. Set `SPREADSHEET_ID` GAS ke salinan tersebut.
-3. Build dan push GAS ke deployment test.
-4. Arahkan Cloudflare Preview ke URL deployment GAS test.
-5. Uji login, master gaji, create, list, delete, laporan, dan PDF dari kedua target.
-6. Backup Spreadsheet produksi.
-7. Set production properties dan Cloudflare environment variables.
-8. Update deployment GAS produksi.
-9. Deploy branch `main` ke Cloudflare Pages.
+3. Build dan push GAS ke deployment test: `npm run push:gas`
+4. Perbarui deployment test ke **New version** (Deploy → Manage deployments → Edit → New version → Deploy).
+5. Arahkan Cloudflare Preview ke URL deployment GAS test.
+6. Uji login, master gaji, create, list, **update**, delete, laporan, dan PDF dari kedua target.
+7. Jalankan `npm run verify:gas` untuk memastikan semua aksi dikenali.
+8. Backup Spreadsheet produksi.
+9. Set production properties dan Cloudflare environment variables.
+10. Push GAS produksi: `npm run push:gas`
+11. Perbarui deployment produksi ke **New version** (langkah yang sama dengan nomor 4).
+12. Jalankan `npm run verify:gas` terhadap URL produksi.
+13. Deploy branch `main` ke Cloudflare Pages.
 
 Jangan menggunakan deployment produksi saat integration test create/delete.
 
 ## Perintah
 
 ```powershell
-npm test             # Node test
-npm run build        # Pages + GAS
+npm test             # Node test runner
+npm run build        # Pages + GAS artifacts
 npm run build:pages  # Artifact Cloudflare
 npm run build:gas    # Artifact GAS
 npm run dev:pages    # Local Pages preview
-npm run push:gas     # Build lalu clasp push
+npm run push:gas     # Build lalu clasp push (ikuti langkah update deployment setelahnya)
+npm run verify:gas   # Verifikasi deployment GAS aktif: versi dan action routing
 ```
 
 ## Catatan keamanan

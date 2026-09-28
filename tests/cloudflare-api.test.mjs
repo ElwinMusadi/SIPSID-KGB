@@ -7,6 +7,7 @@ import {
   handleRequest,
   isAllowedOrigin,
   mapRoute,
+  normalizeGasResponse,
   validateConfig,
 } from "../functions/api/[[path]].js";
 
@@ -434,4 +435,57 @@ test("DELETE /api/letters/:id maps not_found and forbidden from GAS correctly", 
   const forbiddenBody = await forbiddenResp.json();
   assert.equal(forbiddenBody.ok, false);
   assert.equal(forbiddenBody.error.code, "forbidden");
+});
+
+test("normalizeGasResponse meneruskan gasBackendVersion dari GAS ke lapisan Cloudflare", () => {
+  // GAS response sukses dengan gasBackendVersion — versi harus diteruskan di envelope root
+  // (bukan di dalam data) sehingga log/monitoring bisa mendeteksi mismatch deployment.
+  const successWithVersion = normalizeGasResponse({
+    status: "success",
+    data: { id: "KGB-001", nama: "Test" },
+    gasBackendVersion: "2.1.0",
+  });
+  assert.equal(successWithVersion.ok, true);
+  assert.equal(successWithVersion.data.id, "KGB-001");
+  // gasBackendVersion harus ada di envelope root (bukan di dalam data)
+  assert.equal(successWithVersion.gasBackendVersion, "2.1.0",
+    "gasBackendVersion harus ada di envelope root Cloudflare (bukan di dalam data)");
+  // gasBackendVersion tidak boleh ikut masuk ke dalam data (bukan urusan data surat)
+  assert.equal(successWithVersion.data.gasBackendVersion, undefined,
+    "gasBackendVersion tidak boleh masuk ke dalam data payload");
+
+  // GAS response error dengan gasBackendVersion (mis. ACTION_NOT_FOUND dari versi lama)
+  const errorWithVersion = normalizeGasResponse({
+    status: "error",
+    errorCode: "ACTION_NOT_FOUND",
+    errorMsg: "Aksi API tidak dikenal: letters.update. GAS backend v1.9.0 mendukung: ...",
+    gasBackendVersion: "1.9.0",
+  });
+  assert.equal(errorWithVersion.ok, false);
+  assert.equal(errorWithVersion.error.code, "action_not_found");
+  assert.equal(errorWithVersion.gasBackendVersion, "1.9.0",
+    "gasBackendVersion harus ada di envelope root untuk error response");
+  // Pesan error dari GAS yang menyebut versi harus ikut diteruskan
+  assert.ok(errorWithVersion.error.message.includes("letters.update"),
+    "Pesan error ACTION_NOT_FOUND harus menyebut aksi yang tidak dikenali");
+});
+
+test("normalizeGasResponse: gasBackendVersion tidak distrip oleh sanitizeClientValue", () => {
+  // gasBackendVersion bukan secret — tidak boleh distrip oleh sanitizeClientValue
+  // (sanitizeClientValue hanya strip: apiSecret, secret, sessionToken, token, password, stack)
+  // Ketika tidak ada field `data`, root response menjadi `data` — pastikan gasBackendVersion
+  // diambil dari root sebelum konversi, bukan ikut masuk ke data payload.
+  const result = normalizeGasResponse({
+    status: "success",
+    gasBackendVersion: "2.1.0",
+    otherField: "bukan-secret",
+    // data tidak ada, harus mengambil dari root response
+  });
+  assert.equal(result.ok, true);
+  // gasBackendVersion di envelope root
+  assert.equal(result.gasBackendVersion, "2.1.0");
+  // otherField masuk ke data (bukan secret)
+  assert.equal(result.data.otherField, "bukan-secret");
+  // gasBackendVersion tidak masuk ke data (sudah dihapus dari root sebelum dijadikan data)
+  assert.equal(result.data.gasBackendVersion, undefined);
 });

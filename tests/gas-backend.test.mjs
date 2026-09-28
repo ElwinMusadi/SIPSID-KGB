@@ -560,6 +560,9 @@ test("doPost memverifikasi API secret gateway dan mengembalikan JSON output ters
   const badSecretJson = JSON.parse(badSecretPost.getContent());
   assert.equal(badSecretJson.status, "error");
   assert.equal(badSecretJson.errorCode, "UNAUTHORIZED_GATEWAY");
+  // Setiap error response menyertakan gasBackendVersion
+  assert.ok(typeof badSecretJson.gasBackendVersion === "string" && badSecretJson.gasBackendVersion.length > 0,
+    "Error response harus menyertakan gasBackendVersion");
 
   // 2. Secret benar dan action letters.create lalu letters.update
   const createPost = ctx.doPost({
@@ -574,6 +577,8 @@ test("doPost memverifikasi API secret gateway dan mengembalikan JSON output ters
   });
   const createJson = JSON.parse(createPost.getContent());
   assert.equal(createJson.status, "success");
+  assert.ok(typeof createJson.gasBackendVersion === "string",
+    "Success response harus menyertakan gasBackendVersion");
   const createdId = createJson.data.id;
 
   const updatePost = ctx.doPost({
@@ -589,4 +594,103 @@ test("doPost memverifikasi API secret gateway dan mengembalikan JSON output ters
   const updateJson = JSON.parse(updatePost.getContent());
   assert.equal(updateJson.status, "success");
   assert.equal(updateJson.data.nama, "Pegawai doPost Updated");
+});
+
+test("system.manifest mengembalikan GAS_BACKEND_VERSION dan semua aksi yang dibutuhkan Cloudflare", () => {
+  const { ctx } = createGasEnv();
+
+  // system.manifest harus bisa dipanggil via dispatchHttpAction_ (hanya butuh apiSecret, bukan sessionToken)
+  const result = ctx.dispatchHttpAction_({ action: "system.manifest", payload: {} });
+  assert.equal(result.status, "success");
+  assert.ok(typeof result.gasBackendVersion === "string" && result.gasBackendVersion.length > 0,
+    "Manifest harus menyertakan gasBackendVersion");
+
+  // GAS_BACKEND_VERSION di Code.js harus cocok dengan apa yang dilaporkan manifest
+  assert.equal(result.gasBackendVersion, ctx.GAS_BACKEND_VERSION,
+    "gasBackendVersion dalam manifest harus sama dengan GAS_BACKEND_VERSION di source");
+
+  // Semua aksi yang dibutuhkan Cloudflare (dari ROUTES + dynamic routes di [[path]].js) harus terdaftar.
+  // Daftar ini adalah source of truth untuk deteksi mismatch deployment.
+  const CLOUDFLARE_REQUIRED_ACTIONS = [
+    "auth.login",
+    "auth.logout",
+    "bootstrap.get",
+    "letters.list",
+    "letters.create",
+    "letters.update",  // Aksi yang menyebabkan error produksi ACTION_NOT_FOUND
+    "letters.delete",
+    "system.manifest",
+  ];
+  for (const action of CLOUDFLARE_REQUIRED_ACTIONS) {
+    assert.ok(result.supportedActions.includes(action),
+      `Manifest harus mendaftarkan aksi "${action}" di supportedActions`);
+  }
+});
+
+test("ACTION_NOT_FOUND error menyertakan nama aksi dan versi GAS untuk mempermudah diagnosis deployment", () => {
+  const { ctx } = createGasEnv();
+
+  assert.throws(
+    () => ctx.dispatchHttpAction_({ action: "letters.nonexistent", payload: {} }),
+    (err) => {
+      assert.equal(err.code, "ACTION_NOT_FOUND");
+      // Pesan error harus menyebut aksi yang tidak dikenali
+      assert.ok(err.message.includes("letters.nonexistent"),
+        "Error message harus menyebut nama aksi yang tidak dikenali");
+      // Pesan error harus menyebut versi GAS sehingga operator bisa mendiagnosis mismatch
+      assert.ok(err.message.includes(ctx.GAS_BACKEND_VERSION),
+        "Error message harus menyertakan GAS_BACKEND_VERSION untuk diagnosis mismatch deployment");
+      return true;
+    }
+  );
+});
+
+test("doPost menyertakan gasBackendVersion di semua jalur respons (sukses, error, aksi tidak dikenal)", () => {
+  const { ctx } = createGasEnv();
+  const token = ctx.createSessionToken_({ username: "admin", namaLengkap: "Admin", hakAkses: "admin" });
+
+  // Jalur sukses: bootstrap.get
+  const successPost = ctx.doPost({
+    postData: {
+      contents: JSON.stringify({
+        apiSecret: "test-secret-123",
+        action: "bootstrap.get",
+      }),
+    },
+  });
+  const successJson = JSON.parse(successPost.getContent());
+  assert.equal(successJson.gasBackendVersion, ctx.GAS_BACKEND_VERSION,
+    "Respons sukses harus menyertakan gasBackendVersion");
+
+  // Jalur error: ACTION_NOT_FOUND — kasus yang sesuai error produksi
+  const unknownActionPost = ctx.doPost({
+    postData: {
+      contents: JSON.stringify({
+        apiSecret: "test-secret-123",
+        action: "letters.unknown_future_action",
+        sessionToken: token,
+      }),
+    },
+  });
+  const unknownJson = JSON.parse(unknownActionPost.getContent());
+  assert.equal(unknownJson.status, "error");
+  assert.equal(unknownJson.errorCode, "ACTION_NOT_FOUND");
+  assert.equal(unknownJson.gasBackendVersion, ctx.GAS_BACKEND_VERSION,
+    "ACTION_NOT_FOUND response harus menyertakan gasBackendVersion untuk diagnosis deployment");
+
+  // Jalur error: VALIDATION_ERROR (tidak mengubah contract gasBackendVersion)
+  const validationPost = ctx.doPost({
+    postData: {
+      contents: JSON.stringify({
+        apiSecret: "test-secret-123",
+        action: "letters.update",
+        sessionToken: token,
+        payload: { id: "   " }, // ID kosong -> VALIDATION_ERROR
+      }),
+    },
+  });
+  const validationJson = JSON.parse(validationPost.getContent());
+  assert.equal(validationJson.status, "error");
+  assert.equal(validationJson.gasBackendVersion, ctx.GAS_BACKEND_VERSION,
+    "VALIDATION_ERROR response harus menyertakan gasBackendVersion");
 });

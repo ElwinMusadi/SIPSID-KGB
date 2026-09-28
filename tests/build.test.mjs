@@ -76,3 +76,60 @@ test("laporan rekapitulasi diunduh sebagai PDF menggunakan generator bersama", a
     assert.match(artifact, /id="btn-download-report-pdf"/);
   }
 });
+
+test("push-gas.mjs menyertakan instruksi 'New version' dan bukan '@HEAD atau nomor tertinggi'", async () => {
+  const script = await readFile(resolve(root, "scripts", "push-gas.mjs"), "utf8");
+
+  // Instruksi yang benar: New version
+  assert.match(script, /New version/,
+    "push-gas.mjs harus menginstruksikan 'New version' pada dropdown Version");
+
+  // Instruksi yang benar: verify:gas
+  assert.match(script, /verify:gas/,
+    "push-gas.mjs harus menginstruksikan 'npm run verify:gas' setelah deployment");
+
+  // Instruksi yang salah tidak boleh ada
+  assert.doesNotMatch(script, /@HEAD/,
+    "push-gas.mjs tidak boleh menginstruksikan pilih '@HEAD'");
+  assert.doesNotMatch(script, /nomor tertinggi/,
+    "push-gas.mjs tidak boleh menginstruksikan pilih nomor tertinggi");
+
+  // Penjelasan bahwa URL /exec dan deployment ID tetap sama setelah New version
+  assert.match(script, /deployment ID.*tetap|tetap sama/,
+    "push-gas.mjs harus menjelaskan bahwa deployment ID dan URL /exec tidak berubah");
+});
+
+test("verify-gas-deployment.mjs mengarahkan remediation ke 'New version'", async () => {
+  const script = await readFile(resolve(root, "scripts", "verify-gas-deployment.mjs"), "utf8");
+
+  assert.match(script, /New version/,
+    "verify:gas harus menginstruksikan 'New version' saat deployment belum mengenali manifest");
+  assert.match(script, /Jalankan kembali: npm run verify:gas/,
+    "verify:gas harus meminta verifikasi ulang setelah deployment diperbarui");
+  assert.doesNotMatch(script, /Pilih version terbaru|pilih versi terbaru/i,
+    "verify:gas tidak boleh memakai instruksi versi terbaru yang ambigu");
+});
+
+test("README menyebut 'New version', verify:gas, dan bahwa clasp push tidak memperbarui /exec", async () => {
+  const readme = await readFile(resolve(root, "README.md"), "utf8");
+
+  // Kunci runbook: New version
+  assert.match(readme, /New version/,
+    "README harus menginstruksikan 'New version' untuk memperbarui deployment GAS");
+
+  // Perintah verifikasi
+  assert.match(readme, /verify:gas/,
+    "README harus menyebut 'npm run verify:gas'");
+
+  // Koreksi miskonsepsi kunci
+  assert.match(readme, /clasp push.*tidak memperbarui|tidak.*memperbarui.*\/exec/,
+    "README harus menjelaskan bahwa clasp push saja tidak memperbarui endpoint /exec");
+
+  // Fitur update arsip harus masuk ke testing flow
+  assert.match(readme, /update/i,
+    "README harus menyebut 'update' dalam daftar langkah uji (testing flow)");
+
+  // Perintah verify:gas harus ada di daftar perintah
+  assert.match(readme, /npm run verify:gas/,
+    "README harus mendaftarkan 'npm run verify:gas' di bagian Perintah");
+});

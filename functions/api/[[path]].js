@@ -149,6 +149,11 @@ export function normalizeGasResponse(value) {
     return { ok: false, data: null, error: { code: "upstream_invalid_response", message: "Respons layanan tidak valid." } };
   }
 
+  // Ekstrak gasBackendVersion dari root GAS response untuk disertakan di envelope.
+  // Ini memungkinkan log Cloudflare mendeteksi mismatch antara versi deployment GAS
+  // yang berjalan dengan versi source yang diharapkan, tanpa mengkontaminasi data.
+  const gasBackendVersion = typeof value.gasBackendVersion === "string" ? value.gasBackendVersion : undefined;
+
   const failed = value.ok === false || (typeof value.status === "string" && value.status.toLowerCase() !== "success");
   if (failed) {
     const rawCode = typeof value.error?.code === "string"
@@ -166,16 +171,25 @@ export function normalizeGasResponse(value) {
         : typeof value.message === "string"
           ? value.message
           : "Permintaan gagal.";
-    return { ok: false, data: null, error: { code, message } };
+    const result = { ok: false, data: null, error: { code, message } };
+    if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+    return result;
   }
 
-  if (Object.hasOwn(value, "data")) return { ok: true, data: sanitizeClientValue(value.data), error: null };
+  if (Object.hasOwn(value, "data")) {
+    const result = { ok: true, data: sanitizeClientValue(value.data), error: null };
+    if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+    return result;
+  }
   const data = { ...value };
   delete data.ok;
   delete data.status;
   delete data.error;
   delete data.errorMsg;
-  return { ok: true, data: sanitizeClientValue(data), error: null };
+  delete data.gasBackendVersion;
+  const result = { ok: true, data: sanitizeClientValue(data), error: null };
+  if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+  return result;
 }
 
 function extractSession(upstream) {

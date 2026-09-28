@@ -1,3 +1,16 @@
+/**
+ * Versi backend GAS. Naikkan nilai ini setiap kali ada perubahan yang memerlukan
+ * pembaruan GAS deployment (bukan hanya Cloudflare). Nilai ini disertakan dalam
+ * setiap respons doPost sehingga mismatch antara versi deployed dan source
+ * dapat dideteksi dari log Cloudflare maupun laporan error klien.
+ *
+ * PENTING: setelah `npm run push:gas`, deployment aktif di GAS App Editor
+ * harus diperbarui secara manual: Deploy > Manage deployments > [deployment] > Edit >
+ * Version: New version > Deploy. Tanpa langkah ini, endpoint produksi masih
+ * melayani versi lama dan akan mengembalikan ACTION_NOT_FOUND untuk aksi baru.
+ */
+var GAS_BACKEND_VERSION = "2.1.0";
+
 var CONFIG_KEYS_ = {
   SPREADSHEET_ID: "SPREADSHEET_ID",
   CLOUDFLARE_API_SECRET: "CLOUDFLARE_API_SECRET",
@@ -32,19 +45,25 @@ function doGet() {
 /**
  * HTTP entry point used only by the Cloudflare Pages Function.
  * Browser clients must never receive CLOUDFLARE_API_SECRET.
+ *
+ * Setiap respons menyertakan gasBackendVersion sehingga Cloudflare atau klien
+ * dapat mendeteksi bila GAS deployment yang aktif masih menggunakan versi lama
+ * yang belum mengenali aksi baru (misal letters.update).
  */
 function doPost(e) {
   try {
     var request = parseHttpRequest_(e);
     verifyCloudflareSecret_(request.apiSecret);
     var result = dispatchHttpAction_(request);
+    result.gasBackendVersion = GAS_BACKEND_VERSION;
     return jsonOutput_(result);
   } catch (error) {
     console.error("SIPSID API error", error);
     return jsonOutput_({
       status: "error",
       errorCode: error && error.code ? error.code : "INTERNAL_ERROR",
-      errorMsg: publicErrorMessage_(error)
+      errorMsg: publicErrorMessage_(error),
+      gasBackendVersion: GAS_BACKEND_VERSION
     });
   }
 }
@@ -106,7 +125,20 @@ function dispatchHttpAction_(request) {
   if (action === "letters.update") return apiUpdateLetter(request.sessionToken, payload.id, payload);
   if (action === "letters.delete") return apiDeleteLetter(request.sessionToken, payload.id);
 
-  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal.");
+  // Manifest action: digunakan oleh skrip deploy/verify untuk memastikan deployment
+  // aktif mengenali semua aksi. Tidak memerlukan sessionToken, hanya apiSecret
+  // (sudah diverifikasi di doPost sebelum dispatcher dipanggil).
+  if (action === "system.manifest") return {
+    status: "success",
+    gasBackendVersion: GAS_BACKEND_VERSION,
+    supportedActions: [
+      "auth.login", "auth.logout", "bootstrap.get",
+      "letters.list", "letters.create", "letters.update", "letters.delete",
+      "system.manifest"
+    ]
+  };
+
+  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal: " + action + ". GAS backend v" + GAS_BACKEND_VERSION + " mendukung: auth.login, auth.logout, bootstrap.get, letters.list, letters.create, letters.update, letters.delete, system.manifest.");
 }
 
 function login_(credentials) {
