@@ -1,3 +1,3 @@
-GAS_WEB_APP_URL=https://script.google.com/macros/s/REPLACE_DEPLOYMENT_ID/exec
+GAS_WEB_APP_URL=https://script.google.com/macros/s/AKfycbzNF8f76oKQXQqJjZGzqgrmoRjqOisma7mhmzaDp9jkLujDZF40cQ96C5VuIlQ9IhOZ1Q/exec
 CLOUDFLARE_API_SECRET=replace-with-the-same-random-secret-as-gas-script-properties
 ALLOWED_ORIGIN=http://localhost:8788
