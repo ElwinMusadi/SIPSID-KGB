@@ -9,7 +9,7 @@
  * Version: New version > Deploy. Tanpa langkah ini, endpoint produksi masih
  * melayani versi lama dan akan mengembalikan ACTION_NOT_FOUND untuk aksi baru.
  */
-var GAS_BACKEND_VERSION = "2.4.4";
+var GAS_BACKEND_VERSION = "2.5.1";
 
 var CONFIG_KEYS_ = {
   SPREADSHEET_ID: "SPREADSHEET_ID",
@@ -76,6 +76,29 @@ function apiLogout() {
   return { status: "success" };
 }
 
+/**
+ * apiGetSession — validates sessionToken and returns the current user identity.
+ *
+ * Uses requireCurrentSession_ (full sv + live-sheet check) so stale tokens
+ * (after password reset, role change, deletion) return AUTH_REQUIRED, not user data.
+ * Response NEVER includes sessionToken or any credential material.
+ *
+ * Returns:
+ *   { status: "success", user: { username, namaLengkap, hakAkses } }
+ * Throws AUTH_REQUIRED / SESSION_EXPIRED when token is invalid or stale.
+ */
+function apiGetSession(sessionToken) {
+  var session = requireCurrentSession_(sessionToken, false);
+  return {
+    status: "success",
+    user: {
+      username: session.username,
+      namaLengkap: session.liveNama || session.namaLengkap,
+      hakAkses: session.liveRole || session.hakAkses
+    }
+  };
+}
+
 function apiGetBootstrap() {
   return getBootstrapData_();
 }
@@ -87,7 +110,10 @@ function apiListLetters(sessionToken) {
 
 function apiCreateLetter(sessionToken, payload) {
   var session = requireCurrentSession_(sessionToken, false);
-  return createLetter_(payload || {}, session);
+  // Extract requestId before passing payload to validateAndNormalizeLetter_ so
+  // the client cannot use it to choose an arbitrary letter ID via the body.
+  var rawRequestId = payload ? payload.requestId : undefined;
+  return createLetter_(payload || {}, session, rawRequestId);
 }
 
 function apiDeleteLetter(sessionToken, id) {
@@ -146,6 +172,7 @@ function dispatchHttpAction_(request) {
 
   if (action === "auth.login") return login_(payload);
   if (action === "auth.logout") return { status: "success" };
+  if (action === "auth.session") return apiGetSession(request.sessionToken);
   if (action === "bootstrap.get") return getBootstrapData_();
   if (action === "letters.list") return apiListLetters(request.sessionToken);
   if (action === "letters.create") return apiCreateLetter(request.sessionToken, payload);
@@ -166,14 +193,14 @@ function dispatchHttpAction_(request) {
     status: "success",
     gasBackendVersion: GAS_BACKEND_VERSION,
     supportedActions: [
-      "auth.login", "auth.logout", "bootstrap.get",
+      "auth.login", "auth.logout", "auth.session", "bootstrap.get",
       "letters.list", "letters.create", "letters.update", "letters.delete",
       "users.list", "users.create", "users.update", "users.resetPassword", "users.delete",
       "system.manifest"
     ]
   };
 
-  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal: " + action + ". GAS backend v" + GAS_BACKEND_VERSION + " mendukung: auth.login, auth.logout, bootstrap.get, letters.list, letters.create, letters.update, letters.delete, users.list, users.create, users.update, users.resetPassword, users.delete, system.manifest.");
+  throw appError_("ACTION_NOT_FOUND", "Aksi API tidak dikenal: " + action + ". GAS backend v" + GAS_BACKEND_VERSION + " mendukung: auth.login, auth.logout, auth.session, bootstrap.get, letters.list, letters.create, letters.update, letters.delete, users.list, users.create, users.update, users.resetPassword, users.delete, system.manifest.");
 }
 
 function login_(credentials) {
@@ -355,7 +382,16 @@ function listLetters_() {
   return result;
 }
 
-function createLetter_(payload, session) {
+function createLetter_(payload, session, rawRequestId) {
+  // Validate requestId before taking the lock so invalid values are rejected early.
+  var requestId = null;
+  if (rawRequestId !== undefined && rawRequestId !== null && String(rawRequestId).trim() !== "") {
+    requestId = validateRequestId_(rawRequestId);
+    if (!requestId) {
+      throw appError_("VALIDATION_ERROR", "requestId tidak valid. Gunakan UUID atau token aman (alphanum, hyphens, underscores, maks 100 karakter).");
+    }
+  }
+
   var letter = validateAndNormalizeLetter_(payload);
   var lock = LockService.getScriptLock();
   try {
@@ -367,7 +403,23 @@ function createLetter_(payload, session) {
     if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
     validateLetterSheet_(sheet);
 
-    letter.id = createUniqueLetterId_(sheet);
+    if (requestId) {
+      // Idempotency path: derive deterministic ID from requestId.
+      var derivedId = deriveLetterIdFromRequestId_(requestId);
+      var found = findLetterRowByIdInSheet_(sheet, derivedId);
+      if (found.rowIndex !== -1) {
+        // Row already exists — return existing data without appending.
+        var existing = rowToLetter_(found.rowData);
+        console.info("Letter create idempotent", JSON.stringify({ id: derivedId, actor: session.username }));
+        return { status: "success", data: existing, idempotent: true };
+      }
+      // Not found: assign the derived ID and append.
+      letter.id = derivedId;
+    } else {
+      // Legacy path: generate a unique random ID.
+      letter.id = createUniqueLetterId_(sheet);
+    }
+
     var row = [new Date()];
     for (var i = 0; i < LETTER_FIELDS_.length; i++) {
       row.push(safeSheetValue_(letter[LETTER_FIELDS_[i]]));
@@ -469,7 +521,7 @@ function updateLetter_(id, payload, session) {
 
 function validateAndNormalizeLetter_(payload) {
   var required = [
-    "statusPegawai", "nama", "nip", "pangkat", "jabatan", "unit", "kabkot", "skPejabat",
+    "statusPegawai", "nama", "nip", "pangkat", "jabatan", "unit", "skPejabat",
     "skTanggal", "skNomor", "skTmt", "gajiLama", "gajiBaruTmt", "gajiBaru", "suratNomor",
     "suratTanggal", "signJabatan", "signNama", "signPangkat", "signNip"
   ];
@@ -546,6 +598,57 @@ function createUniqueLetterId_(sheet) {
     id = "KGB-" + new Date().getFullYear() + "-" + Utilities.getUuid();
   } while (existing[id]);
   return id;
+}
+
+/**
+ * validateRequestId_ — validates a client-supplied idempotency key.
+ *
+ * Accepts:
+ *   - Standard UUID v4 (case-insensitive, with or without hyphens)
+ *   - Safe opaque token: 1–100 chars, only [A-Za-z0-9\-_] (alphanumeric, hyphens, underscores)
+ *
+ * Rejects anything else (dots, slashes, spaces, control chars, oversized).
+ * Returns the trimmed, lowercased canonical form on success, or null if invalid.
+ *
+ * The derived letter ID will be "KGB-<YYYY>-<requestId>" which is ≤ 4+1+4+1+100 = 110 chars,
+ * safely within validateLetterId_'s 200-char ceiling and within its safe charset
+ * ([A-Za-z0-9._\-/ \s] — hyphens are allowed).
+ */
+function validateRequestId_(raw) {
+  if (raw == null) return null;
+  var id = String(raw).trim();
+  if (!id || id.length > 100) return null;
+  // Only alphanum, hyphens, underscores — safe for KGB-YYYY-<id> composite.
+  if (!/^[A-Za-z0-9\-_]+$/.test(id)) return null;
+  return id.toLowerCase();
+}
+
+/**
+ * deriveLetterIdFromRequestId_ — computes the deterministic letter ID for a requestId.
+ * Format: "KGB-<current year>-<canonicalRequestId>"
+ * The composite stays within validateLetterId_'s 200-char limit.
+ */
+function deriveLetterIdFromRequestId_(requestId) {
+  return "KGB-" + new Date().getFullYear() + "-" + requestId;
+}
+
+/**
+ * findLetterRowByIdInSheet_ — scans sheet col B for the given ID inside an
+ * already-held ScriptLock, returning the row index (1-based) or -1 if not found.
+ * Also returns the matching row data for idempotent response construction.
+ */
+function findLetterRowByIdInSheet_(sheet, letterId) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { rowIndex: -1, rowData: null };
+  var ids = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0] || "").trim() === letterId) {
+      // Fetch the full row for idempotent response.
+      var fullRow = sheet.getRange(i + 2, 1, 1, LETTER_FIELDS_.length + 1).getDisplayValues()[0];
+      return { rowIndex: i + 2, rowData: fullRow };
+    }
+  }
+  return { rowIndex: -1, rowData: null };
 }
 
 function createSessionToken_(user) {

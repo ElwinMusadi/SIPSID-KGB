@@ -10,7 +10,6 @@ import {
   normalizeGasResponse,
   validateConfig,
 } from "../functions/api/[[path]].js";
-
 const env = {
   GAS_WEB_APP_URL: "https://script.google.com/macros/s/example/exec",
   CLOUDFLARE_API_SECRET: "server-secret",
@@ -490,7 +489,39 @@ test("normalizeGasResponse: gasBackendVersion tidak distrip oleh sanitizeClientV
   assert.equal(result.data.gasBackendVersion, undefined);
 });
 
-// ─── User Management Gateway Tests ─────────────────────────────────────────
+test("normalizeGasResponse: idempotent:true dari GAS diteruskan di envelope root (bukan di data)", () => {
+  // GAS letters.create dengan requestId yang sudah ada mengembalikan idempotent:true di root.
+  const result = normalizeGasResponse({
+    status: "success",
+    idempotent: true,
+    data: { id: "KGB-2026-req-001", nama: "Test" },
+  });
+  assert.equal(result.ok, true);
+  // idempotent ada di envelope root
+  assert.equal(result.idempotent, true, "idempotent harus ada di envelope root");
+  // idempotent tidak masuk ke data
+  assert.equal(result.data.idempotent, undefined, "idempotent tidak boleh masuk ke data payload");
+  // data biasa tetap ada
+  assert.equal(result.data.id, "KGB-2026-req-001");
+});
+
+test("normalizeGasResponse: idempotent tidak ada di respons biasa (undefined, bukan false)", () => {
+  const result = normalizeGasResponse({
+    status: "success",
+    data: { id: "KGB-2026-random", nama: "Test" },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.idempotent, undefined, "idempotent tidak boleh ada di respons non-idempotent");
+});
+
+test("normalizeGasResponse: idempotent:false diabaikan (hanya true yang diteruskan)", () => {
+  const result = normalizeGasResponse({
+    status: "success",
+    idempotent: false,
+    data: { id: "KGB-2026-x" },
+  });
+  assert.equal(result.idempotent, undefined, "idempotent:false harus diabaikan (tidak diteruskan)");
+});
 
 test("mapRoute memetakan semua rute users.* dengan benar", () => {
   // GET /api/users -> users.list
@@ -904,4 +935,349 @@ test("users.list: password/hash/token absent recursively from all objects in res
   assert.ok(body.data.some((u) => u.username === "admin"), "admin user must be in data");
   assert.ok(body.data.some((u) => u.username === "staff"), "staff user must be in data");
   assert.ok(body.data.some((u) => u.hakAkses === "admin"), "hakAkses must be preserved");
+});
+
+// ─── Session Restore Route Tests ────────────────────────────────────────────
+
+test("GET /api/auth/session dipetakan ke action auth.session", () => {
+  const route = mapRoute("GET", "/api/auth/session");
+  assert.ok(route !== null, "Route auth/session harus ada");
+  assert.equal(route.action, "auth.session");
+  assert.equal(route.mutation, undefined, "auth.session bukan mutation");
+  assert.equal(route.body, undefined, "auth.session tidak memerlukan body");
+});
+
+test("GET /api/auth/session meneruskan cookie session ke GAS", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/auth/session", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=my-valid-token" },
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({
+      status: "success",
+      gasBackendVersion: "2.5.0",
+      user: { username: "admin", namaLengkap: "Administrator", hakAkses: "admin" },
+    });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "auth.session");
+  assert.equal(envelope.sessionToken, "my-valid-token");
+  assert.equal(envelope.apiSecret, env.CLOUDFLARE_API_SECRET);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.data.user.username, "admin");
+  // sessionToken must NOT appear in response
+  assert.equal(JSON.stringify(body).includes("sessionToken"), false);
+  assert.equal(JSON.stringify(body).includes("my-valid-token"), false);
+  // No Set-Cookie on success
+  assert.equal(response.headers.get("Set-Cookie"), null);
+});
+
+test("GET /api/auth/session: invalid session clears cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/auth/session", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=stale-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "AUTH_REQUIRED",
+    errorMsg: "Sesi tidak valid. Silakan login kembali.",
+  }));
+
+  assert.equal(response.status, 401);
+  const setCookie = response.headers.get("Set-Cookie");
+  assert.ok(setCookie !== null, "Set-Cookie harus ada saat sesi tidak valid");
+  assert.match(setCookie, /Max-Age=0/, "Cookie harus dihapus (Max-Age=0)");
+});
+
+test("GET /api/auth/session: session_expired clears cookie", async () => {
+  const response = await handleRequest({
+    request: request("/api/auth/session", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=expired-token" },
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "error",
+    errorCode: "SESSION_EXPIRED",
+    errorMsg: "Sesi telah berakhir. Silakan login kembali.",
+  }));
+
+  assert.equal(response.status, 401);
+  assert.match(response.headers.get("Set-Cookie"), /Max-Age=0/);
+});
+
+test("GET /api/auth/session: no cookie sent when no session cookie exists", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/auth/session", { method: "GET" }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    return gasResponse({
+      status: "error",
+      errorCode: "AUTH_REQUIRED",
+      errorMsg: "Sesi tidak valid.",
+    });
+  });
+
+  assert.equal(envelope.sessionToken, "");
+  assert.equal(response.status, 401);
+});
+
+test("GET /api/auth/session: tidak memerlukan Origin header (bukan mutation)", async () => {
+  // Non-mutation routes skip CORS origin check.
+  const response = await handleRequest({
+    request: request("/api/auth/session", {
+      method: "GET",
+      // No Origin header
+    }),
+    env,
+  }, async () => gasResponse({
+    status: "success",
+    user: { username: "u", namaLengkap: "U", hakAkses: "pengelola" },
+  }));
+
+  // Should reach GAS (not blocked by origin check) and return 200.
+  assert.equal(response.status, 200);
+});
+
+// ─── Upstream Resilience / Retry Tests ──────────────────────────────────────
+
+test("UPSTREAM_TIMEOUT_MS dikonfigurasi ke nilai yang wajar untuk GAS cold start (>= 20 detik)", async () => {
+  // Import the constant indirectly by checking timeout behavior.
+  // The timeout is tested by verifying retry applies and that 504 is returned
+  // after retries are exhausted. Direct constant value check is done here via
+  // a property exported from the module (if available) or via behavior.
+  // We import the file's text to check the constant value.
+  const { readFile } = await import("node:fs/promises");
+  const { resolve, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const src = await readFile(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../functions/api/[[path]].js"),
+    "utf8"
+  );
+  const match = src.match(/const UPSTREAM_TIMEOUT_MS\s*=\s*(\d[\d_]*)/);
+  assert.ok(match, "UPSTREAM_TIMEOUT_MS harus terdefinisi");
+  const ms = Number(match[1].replace(/_/g, ""));
+  assert.ok(ms >= 20_000, `UPSTREAM_TIMEOUT_MS (${ms}ms) harus >= 20000ms untuk mengakomodasi GAS cold start`);
+});
+
+test("safe GET (bootstrap.get) di-retry sekali setelah network abort — attempt kedua sukses", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/bootstrap", { method: "GET" }),
+    env,
+  }, async () => {
+    callCount++;
+    if (callCount === 1) {
+      // Simulate network abort on first attempt.
+      const err = new Error("fetch failed");
+      err.name = "AbortError";
+      throw err;
+    }
+    return gasResponse({ status: "success", gajiPNS: [], gajiPPPK: [] });
+  });
+
+  assert.equal(callCount, 2, "Harus ada 2 attempt (1 abort + 1 sukses)");
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+});
+
+test("safe GET (letters.list) di-retry sekali setelah upstream 504 — attempt kedua sukses", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=token" },
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    if (callCount === 1) return new Response("gateway timeout", { status: 504 });
+    return gasResponse({ status: "success", data: [] });
+  });
+
+  assert.equal(callCount, 2, "Harus ada 2 attempt (504 + sukses)");
+  assert.equal(response.status, 200);
+});
+
+test("safe GET (auth.session) di-retry sekali setelah upstream 502", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/auth/session", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=token" },
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    if (callCount === 1) return new Response("bad gateway", { status: 502 });
+    return gasResponse({ status: "success", user: { username: "u", namaLengkap: "U", hakAkses: "pengelola" } });
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(response.status, 200);
+});
+
+test("safe GET: kedua attempt gagal → 504 upstream_unavailable", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/bootstrap", { method: "GET" }),
+    env,
+  }, async () => {
+    callCount++;
+    throw new Error("network error");
+  });
+
+  assert.equal(callCount, 2, "Harus ada 2 attempt sebelum menyerah");
+  assert.equal(response.status, 504);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "upstream_unavailable");
+});
+
+test("mutation (letters.create) tidak di-retry meski gagal pertama", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=token",
+      },
+      body: JSON.stringify({ nama: "Test" }),
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    throw new Error("network error");
+  });
+
+  assert.equal(callCount, 1, "Mutation tidak boleh di-retry");
+  assert.equal(response.status, 504);
+});
+
+test("login (auth.login) tidak di-retry — throttle side effect", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/auth/login", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ username: "admin", password: "wrong" }),
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    throw new Error("network error");
+  });
+
+  assert.equal(callCount, 1, "Login tidak boleh di-retry karena throttle slot dikonsumsi GAS");
+  assert.equal(response.status, 504);
+});
+
+test("safe GET tidak di-retry untuk HTTP 4xx dari upstream", async () => {
+  // 4xx errors (mis. 400, 401) tidak boleh di-retry — hanya 502/503/504 dan network error.
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/bootstrap", { method: "GET" }),
+    env,
+  }, async () => {
+    callCount++;
+    return gasResponse({ status: "error", errorCode: "AUTH_REQUIRED", errorMsg: "X" }, 401);
+  });
+
+  assert.equal(callCount, 1, "4xx tidak boleh di-retry");
+});
+
+test("users.list (safe GET) di-retry sekali setelah upstream 503", async () => {
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/users", {
+      method: "GET",
+      headers: { Cookie: "sipsid_session=admin-token" },
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    if (callCount === 1) return new Response("service unavailable", { status: 503 });
+    return gasResponse({ status: "success", data: [] });
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(response.status, 200);
+});
+
+// ─── Gateway: requestId forwarded transparently in letters.create payload ────
+
+test("POST /api/letters meneruskan requestId dari body ke GAS payload tanpa modifikasi", async () => {
+  let envelope;
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=my-token",
+      },
+      body: JSON.stringify({
+        requestId: "550e8400-e29b-41d4-a716-446655440001",
+        nama: "Test",
+      }),
+    }),
+    env,
+  }, async (_url, init) => {
+    envelope = JSON.parse(init.body);
+    // Simulate idempotent GAS response
+    return gasResponse({
+      status: "success",
+      idempotent: true,
+      data: { id: "KGB-2026-550e8400-e29b-41d4-a716-446655440001", nama: "Test" },
+    });
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(envelope.action, "letters.create");
+  assert.equal(envelope.payload.requestId, "550e8400-e29b-41d4-a716-446655440001",
+    "requestId harus diteruskan di payload ke GAS tanpa strip");
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  // idempotent flag ada di envelope root, bukan di dalam data
+  assert.equal(body.idempotent, true, "idempotent:true harus ada di envelope root Cloudflare");
+});
+
+test("POST /api/letters mutation tidak di-retry meski requestId ada (idempotency di GAS bukan di gateway)", async () => {
+  // requestId-based idempotency is handled server-side in GAS, not in the gateway.
+  // The gateway must NOT retry mutations even with requestId.
+  let callCount = 0;
+  const response = await handleRequest({
+    request: request("/api/letters", {
+      method: "POST",
+      headers: {
+        Origin: "https://app.example",
+        "Content-Type": "application/json",
+        Cookie: "sipsid_session=my-token",
+      },
+      body: JSON.stringify({ requestId: "test-req-001", nama: "Test" }),
+    }),
+    env,
+  }, async () => {
+    callCount++;
+    throw new Error("network error");
+  });
+
+  assert.equal(callCount, 1, "Mutation dengan requestId tetap tidak boleh di-retry di gateway");
+  assert.equal(response.status, 504);
 });

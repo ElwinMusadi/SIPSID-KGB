@@ -35,6 +35,7 @@ const expectedVersion = versionMatch[1];
 const REQUIRED_ACTIONS = [
   "auth.login",
   "auth.logout",
+  "auth.session",
   "bootstrap.get",
   "letters.list",
   "letters.create",

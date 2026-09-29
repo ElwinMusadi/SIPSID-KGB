@@ -2755,3 +2755,469 @@ test("LOGIN_THROTTLE_STATE_V1: read and write quota failures fail closed and rec
   const consumeRecovered = ctx.consumeLoginAttempt_("new_user_2");
   assert.equal(consumeRecovered.allowed, true, "consumeLoginAttempt_ should succeed after write quota recovers");
 });
+
+// ─── apiGetSession Tests ────────────────────────────────────────────────────
+
+test("apiGetSession: token valid mengembalikan user identity dari live sheet", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+
+  const result = ctx.apiGetSession(token);
+  assert.equal(result.status, "success");
+  assert.ok(result.user, "Harus ada field user");
+  assert.equal(result.user.username, "admin");
+  assert.equal(result.user.namaLengkap, "Administrator");
+  assert.equal(result.user.hakAkses, "admin");
+  // Tidak ada sessionToken di response
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "sessionToken"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "token"), false);
+});
+
+test("apiGetSession: token staff (pengelola) mengembalikan hakAkses pengelola", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  const result = ctx.apiGetSession(token);
+  assert.equal(result.status, "success");
+  assert.equal(result.user.username, "staff");
+  assert.equal(result.user.hakAkses, "pengelola");
+});
+
+test("apiGetSession: token kosong melempar AUTH_REQUIRED", () => {
+  const { ctx } = createGasEnv();
+
+  assert.throws(
+    () => ctx.apiGetSession(""),
+    (err) => err.code === "AUTH_REQUIRED",
+  );
+});
+
+test("apiGetSession: token dengan signature rusak melempar AUTH_REQUIRED", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const validToken = makeSessionToken(ctx, userSheet, "admin");
+  const parts = validToken.split(".");
+  const tampered = `${parts[0]}.invalidSignatureXYZ`;
+
+  assert.throws(
+    () => ctx.apiGetSession(tampered),
+    (err) => err.code === "AUTH_REQUIRED",
+  );
+});
+
+test("apiGetSession: token expired melempar SESSION_EXPIRED", () => {
+  const { ctx } = createGasEnv();
+  const expiredPayload = {
+    username: "admin",
+    namaLengkap: "Administrator",
+    hakAkses: "admin",
+    iat: Math.floor(Date.now() / 1000) - 7200,
+    exp: Math.floor(Date.now() / 1000) - 3600,
+    nonce: "nonce-test",
+    sv: "dummysv",
+  };
+  const encoded = ctx.base64UrlEncode_(JSON.stringify(expiredPayload));
+  const expiredToken = `${encoded}.${ctx.signValue_(encoded)}`;
+
+  assert.throws(
+    () => ctx.apiGetSession(expiredToken),
+    (err) => err.code === "SESSION_EXPIRED",
+  );
+});
+
+test("apiGetSession: stale token setelah reset password melempar AUTH_REQUIRED", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const tokenBefore = makeSessionToken(ctx, userSheet, "admin");
+
+  // Simulate password reset
+  const adminRow = userSheet.rows.find((r) => String(r[0]).trim() === "admin");
+  adminRow[1] = "sha256$newsalt$newhash";
+
+  assert.throws(
+    () => ctx.apiGetSession(tokenBefore),
+    (err) => err.code === "AUTH_REQUIRED",
+  );
+
+  // Fresh token works
+  const tokenAfter = makeSessionToken(ctx, userSheet, "admin");
+  const result = ctx.apiGetSession(tokenAfter);
+  assert.equal(result.status, "success");
+});
+
+test("apiGetSession: stale token setelah akun dihapus melempar AUTH_REQUIRED", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  // Hapus staff
+  const idx = userSheet.rows.findIndex((r) => String(r[0]).trim() === "staff");
+  userSheet.rows.splice(idx, 1);
+
+  assert.throws(
+    () => ctx.apiGetSession(token),
+    (err) => err.code === "AUTH_REQUIRED",
+  );
+});
+
+test("apiGetSession: token tanpa sv melempar AUTH_REQUIRED", () => {
+  const { ctx } = createGasEnv();
+  const noSvToken = ctx.createSessionToken_({
+    username: "admin",
+    namaLengkap: "Administrator",
+    hakAkses: "admin",
+    // no sv
+  });
+
+  assert.throws(
+    () => ctx.apiGetSession(noSvToken),
+    (err) => err.code === "AUTH_REQUIRED" && /versi credential/i.test(err.message),
+  );
+});
+
+test("apiGetSession: namaLengkap dari live sheet (bukan token payload) dikembalikan", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+
+  // Ubah nama di sheet setelah token dibuat
+  const adminRow = userSheet.rows.find((r) => String(r[0]).trim() === "admin");
+  adminRow[2] = "Administrator Baru";
+
+  // Token sv masih valid (hanya password + role yang berpengaruh ke sv)
+  const result = ctx.apiGetSession(token);
+  assert.equal(result.status, "success");
+  // liveNama dari sheet diutamakan
+  assert.equal(result.user.namaLengkap, "Administrator Baru");
+});
+
+test("auth.session via dispatchHttpAction_ meneruskan sessionToken dengan benar", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+
+  const result = ctx.dispatchHttpAction_({
+    action: "auth.session",
+    sessionToken: token,
+    payload: {},
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.user.username, "admin");
+});
+
+test("system.manifest menyertakan auth.session dalam supportedActions", () => {
+  const { ctx } = createGasEnv();
+  const result = ctx.dispatchHttpAction_({ action: "system.manifest", payload: {} });
+  assert.ok(result.supportedActions.includes("auth.session"),
+    "Manifest harus mendaftarkan aksi auth.session");
+});
+
+// ─── kabkot Validation Tests ────────────────────────────────────────────────
+
+test("kabkot kosong (string kosong) diterima create/update — tidak lagi required", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  // Create tanpa kabkot harus berhasil
+  const createRes = ctx.apiCreateLetter(token, sampleLetterPayload({ kabkot: "" }));
+  assert.equal(createRes.status, "success", "Create dengan kabkot kosong harus berhasil");
+  assert.equal(createRes.data.kabkot, ""); // empty string preserved
+
+  const letterId = createRes.data.id;
+
+  // Update juga tanpa kabkot harus berhasil
+  const updateRes = ctx.apiUpdateLetter(token, letterId, sampleLetterPayload({ kabkot: "" }));
+  assert.equal(updateRes.status, "success", "Update dengan kabkot kosong harus berhasil");
+});
+
+test("kabkot tidak diisi (undefined) diperlakukan sama seperti string kosong", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  const payload = sampleLetterPayload();
+  delete payload.kabkot;
+
+  const createRes = ctx.apiCreateLetter(token, payload);
+  assert.equal(createRes.status, "success", "Create tanpa field kabkot harus berhasil");
+  assert.equal(createRes.data.kabkot, "");
+});
+
+test("kabkot dengan nilai diisi tetap tersimpan di kolom yang benar (index 7 di sheet)", () => {
+  const { ctx, userSheet, letterSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+
+  const createRes = ctx.apiCreateLetter(token, sampleLetterPayload({ kabkot: "Kota Kupang" }));
+  assert.equal(createRes.status, "success");
+
+  // LETTER_FIELDS_: index 0=id, 1=statusPegawai, 2=nama, 3=nip, 4=pangkat, 5=jabatan, 6=unit, 7=kabkot
+  // Sheet: col A=timestamp(0), col B=id(1), col C=statusPegawai(2), ... col I=kabkot(8)
+  assert.equal(letterSheet.rows[1][8], "Kota Kupang", "kabkot harus tersimpan di kolom 8 (index 8, sheet col I)");
+});
+
+test("kabkot kosong tersimpan di kolom yang benar setelah update", () => {
+  const { ctx, userSheet, letterSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload({ kabkot: "Kota Kupang" }));
+  const letterId = created.data.id;
+
+  const updated = ctx.apiUpdateLetter(token, letterId, sampleLetterPayload({ kabkot: "" }));
+  assert.equal(updated.status, "success");
+  // After update: kabkot should be empty string in sheet
+  assert.equal(letterSheet.rows[1][8], "", "kabkot harus tersimpan kosong di sheet setelah update");
+});
+
+test("kabkot kosong tidak mempengaruhi validasi field lain — field required lain masih divalidasi", () => {
+  const { ctx } = createGasEnv();
+
+  // Payload dengan kabkot kosong tapi nama juga kosong — nama masih required
+  assert.throws(
+    () => ctx.validateAndNormalizeLetter_(sampleLetterPayload({ kabkot: "", nama: "" })),
+    (err) => err.code === "VALIDATION_ERROR" && /Field nama/i.test(err.message),
+  );
+});
+
+test("validateAndNormalizeLetter_: kabkot tidak ada di list required", () => {
+  const { ctx } = createGasEnv();
+  // payload valid minus kabkot — harus lulus validasi
+  const payload = sampleLetterPayload({ kabkot: "" });
+  assert.doesNotThrow(() => ctx.validateAndNormalizeLetter_(payload));
+});
+
+test("listLetters_ mengembalikan kabkot kosong sebagai string kosong dari sheet", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  // Pre-populate sheet row with empty kabkot (index 8 in sheet = col I = kabkot)
+  const row = ["2024-01-01", "KGB-2024-TESTKABKOT", "PNS", "Nama", "123", "III/a", "Guru", "SMAN 1",
+    "", // kabkot kosong
+    "Bupati", "2024-01-01", "SK/001", "2024-01-01", "5", "0", "3000000",
+    "6", "0", "2024-01-01", "3500000", "SRT/001", "2024-01-10",
+    "Kadis", "Pejabat", "IV/a", "999", "legal"];
+  letterSheet.rows.push(row);
+
+  const listRes = ctx.apiListLetters(token);
+  assert.equal(listRes.status, "success");
+  const letter = listRes.data.find((l) => l.id === "KGB-2024-TESTKABKOT");
+  assert.ok(letter, "Surat dengan kabkot kosong harus muncul di list");
+  assert.equal(letter.kabkot, "", "kabkot kosong harus dikembalikan sebagai string kosong");
+});
+
+// ─── Create Letter Idempotency (requestId) Tests ─────────────────────────────
+
+test("validateRequestId_: UUID v4 valid diterima dan dikembalikan lowercase", () => {
+  const { ctx } = createGasEnv();
+  const uuid = "550e8400-e29b-41d4-a716-446655440000";
+  assert.equal(ctx.validateRequestId_(uuid), uuid.toLowerCase());
+  // Uppercase UUID juga diterima dan dinormalisasi lowercase
+  assert.equal(ctx.validateRequestId_(uuid.toUpperCase()), uuid.toLowerCase());
+});
+
+test("validateRequestId_: token aman (alphanum + hyphens + underscores) diterima", () => {
+  const { ctx } = createGasEnv();
+  assert.equal(ctx.validateRequestId_("abc123"), "abc123");
+  assert.equal(ctx.validateRequestId_("req-2026-abc_XYZ"), "req-2026-abc_xyz");
+  // Max 100 chars
+  const max100 = "a".repeat(100);
+  assert.equal(ctx.validateRequestId_(max100), max100);
+});
+
+test("validateRequestId_: nilai tidak valid dikembalikan null", () => {
+  const { ctx } = createGasEnv();
+  // Kosong / null / undefined
+  assert.equal(ctx.validateRequestId_(""), null);
+  assert.equal(ctx.validateRequestId_(null), null);
+  assert.equal(ctx.validateRequestId_(undefined), null);
+  // Terlalu panjang (101 chars)
+  assert.equal(ctx.validateRequestId_("a".repeat(101)), null);
+  // Karakter berbahaya: spasi, titik, slash, semicolon
+  assert.equal(ctx.validateRequestId_("has space"), null);
+  assert.equal(ctx.validateRequestId_("has.dot"), null);
+  assert.equal(ctx.validateRequestId_("has/slash"), null);
+  assert.equal(ctx.validateRequestId_("has;semi"), null);
+  assert.equal(ctx.validateRequestId_("has<tag>"), null);
+  // Control characters
+  assert.equal(ctx.validateRequestId_("abc\x00def"), null);
+});
+
+test("create dengan requestId: requestId sama dua kali hanya append satu row (idempotent)", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const requestId = "550e8400-e29b-41d4-a716-446655440001";
+
+  const rowsBefore = letterSheet.rows.length;
+
+  // First create
+  const res1 = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+  assert.equal(res1.status, "success");
+  assert.equal(res1.idempotent, undefined, "First create tidak boleh punya flag idempotent");
+  assert.equal(letterSheet.rows.length, rowsBefore + 1, "Harus menambah satu row");
+
+  const id1 = res1.data.id;
+
+  // Second create with same requestId — simulates retry after response loss
+  const res2 = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+  assert.equal(res2.status, "success");
+  assert.equal(res2.idempotent, true, "Second create harus punya flag idempotent:true");
+  assert.equal(letterSheet.rows.length, rowsBefore + 1, "Tidak boleh append row baru pada retry");
+
+  const id2 = res2.data.id;
+  assert.equal(id1, id2, "ID harus sama untuk requestId yang sama");
+});
+
+test("create dengan requestId: ID deterministik berbentuk KGB-YYYY-<canonical-requestId>", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const requestId = "my-request-id_001";
+  const expectedIdPrefix = `KGB-${new Date().getFullYear()}-${requestId.toLowerCase()}`;
+
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+  assert.equal(res.status, "success");
+  assert.equal(res.data.id, expectedIdPrefix, "ID harus deterministik dari requestId");
+});
+
+test("create tanpa requestId: ID acak dihasilkan (legacy behavior tidak berubah)", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload());
+  assert.equal(res.status, "success");
+  // ID harus mengandung UUID (format KGB-YYYY-<uuid>)
+  assert.match(res.data.id, /^KGB-\d{4}-[0-9a-f-]{36}$/i, "ID tanpa requestId harus berformat KGB-YYYY-<UUID>");
+  assert.equal(res.idempotent, undefined);
+});
+
+test("create dengan requestId berbeda: dua request menghasilkan dua row berbeda", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  const rowsBefore = letterSheet.rows.length;
+  const res1 = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "req-aaa-001" }));
+  const res2 = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "req-bbb-002" }));
+
+  assert.equal(res1.status, "success");
+  assert.equal(res2.status, "success");
+  assert.equal(letterSheet.rows.length, rowsBefore + 2, "Dua requestId berbeda harus menghasilkan dua row");
+  assert.notEqual(res1.data.id, res2.data.id, "ID harus berbeda untuk requestId yang berbeda");
+});
+
+test("create: requestId tidak valid melempar VALIDATION_ERROR sebelum lock diambil", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const rowsBefore = letterSheet.rows.length;
+  const lockBefore = lockState.waitLockCalled;
+
+  assert.throws(
+    () => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "invalid id with spaces" })),
+    (err) => err.code === "VALIDATION_ERROR" && /requestId/i.test(err.message),
+  );
+  // Sheet tidak berubah
+  assert.equal(letterSheet.rows.length, rowsBefore, "Sheet tidak boleh berubah untuk requestId tidak valid");
+  // Lock tidak diambil karena validasi gagal sebelum lock
+  assert.equal(lockState.waitLockCalled, lockBefore, "Lock tidak boleh diambil untuk requestId tidak valid");
+});
+
+test("create: requestId terlalu panjang (>100 char) melempar VALIDATION_ERROR", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  assert.throws(
+    () => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "a".repeat(101) })),
+    (err) => err.code === "VALIDATION_ERROR" && /requestId/i.test(err.message),
+  );
+});
+
+test("create: requestId string kosong diperlakukan sama seperti tidak ada requestId (legacy path)", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const rowsBefore = letterSheet.rows.length;
+
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "" }));
+  assert.equal(res.status, "success");
+  assert.equal(res.idempotent, undefined, "requestId kosong harus trigger legacy path");
+  assert.equal(letterSheet.rows.length, rowsBefore + 1);
+  // ID harus random UUID format (bukan derived)
+  assert.match(res.data.id, /^KGB-\d{4}-[0-9a-f-]{36}$/i);
+});
+
+test("create: requestId null diperlakukan sama seperti tidak ada requestId", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: null }));
+  assert.equal(res.status, "success");
+  assert.equal(res.idempotent, undefined);
+  assert.match(res.data.id, /^KGB-\d{4}-[0-9a-f-]{36}$/i);
+});
+
+test("create idempotent: data yang dikembalikan pada retry adalah data dari sheet (bukan payload baru)", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const requestId = "idem-data-check-001";
+
+  const originalPayload = sampleLetterPayload({ nama: "Nama Original", requestId });
+  const res1 = ctx.apiCreateLetter(token, originalPayload);
+  assert.equal(res1.status, "success");
+
+  // Retry dengan payload berbeda (nama beda) — data yang dikembalikan harus dari sheet (original)
+  const retryPayload = sampleLetterPayload({ nama: "Nama Beda Seharusnya Diabaikan", requestId });
+  const res2 = ctx.apiCreateLetter(token, retryPayload);
+  assert.equal(res2.status, "success");
+  assert.equal(res2.idempotent, true);
+  // nama dikembalikan dari sheet, bukan dari payload retry
+  assert.equal(res2.data.nama, "Nama Original", "Idempotent response harus mengembalikan data original dari sheet");
+  assert.equal(res2.data.id, res1.data.id);
+});
+
+test("create: client tidak bisa memilih ID arbiter via body (requestId tidak mengekspos id langsung)", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  // Client mencoba memilih ID arbiter via body 'id' field — harus diabaikan
+  const payload = sampleLetterPayload({ id: "ATTACKER-CHOSEN-ID", requestId: "safe-req-id-001" });
+  const res = ctx.apiCreateLetter(token, payload);
+  assert.equal(res.status, "success");
+  // ID harus deterministik dari requestId, bukan dari body 'id'
+  assert.notEqual(res.data.id, "ATTACKER-CHOSEN-ID", "Body 'id' tidak boleh dipakai sebagai letter ID");
+  const expectedId = `KGB-${new Date().getFullYear()}-safe-req-id-001`;
+  assert.equal(res.data.id, expectedId, "ID harus berasal dari requestId saja");
+});
+
+test("create idempotent: lock dilepas setelah row ditemukan (idempotent branch)", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const requestId = "lock-release-idem-001";
+
+  ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+
+  const lockBefore = lockState.releaseLockCalled;
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+  assert.equal(res.idempotent, true);
+  assert.equal(lockState.held, false, "Lock harus dilepas setelah idempotent branch");
+  assert.ok(lockState.releaseLockCalled > lockBefore, "releaseLock harus dipanggil pada idempotent branch");
+});
+
+test("create idempotent via dispatchHttpAction_: requestId diteruskan dari payload", () => {
+  const { ctx, userSheet, letterSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const requestId = "dispatch-idem-test-001";
+  const rowsBefore = letterSheet.rows.length;
+
+  const r1 = ctx.dispatchHttpAction_({
+    action: "letters.create",
+    sessionToken: token,
+    payload: sampleLetterPayload({ requestId }),
+  });
+  assert.equal(r1.status, "success");
+  assert.equal(letterSheet.rows.length, rowsBefore + 1);
+
+  const r2 = ctx.dispatchHttpAction_({
+    action: "letters.create",
+    sessionToken: token,
+    payload: sampleLetterPayload({ requestId }),
+  });
+  assert.equal(r2.status, "success");
+  assert.equal(r2.idempotent, true);
+  assert.equal(letterSheet.rows.length, rowsBefore + 1, "Tidak ada row baru pada idempotent retry");
+  assert.equal(r1.data.id, r2.data.id);
+});
+
+test("GAS_BACKEND_VERSION adalah 2.5.1 setelah idempotency contract", () => {
+  const { ctx } = createGasEnv();
+  assert.equal(ctx.GAS_BACKEND_VERSION, "2.5.1");
+});

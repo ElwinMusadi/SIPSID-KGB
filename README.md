@@ -42,6 +42,14 @@ Semua endpoint berikut memerlukan sesi dengan role `admin`. Input `administrator
 | `PUT` | `/api/users/:username/password` | `users.resetPassword` | Reset password user |
 | `DELETE` | `/api/users/:username` | `users.delete` | Hapus user |
 
+## Session Restore
+
+| Method | Path | Aksi GAS | Keterangan |
+|---|---|---|---|
+| `GET` | `/api/auth/session` | `auth.session` | Validasi sesi aktif dan kembalikan identitas user |
+
+Endpoint ini digunakan frontend untuk memverifikasi sesi yang tersimpan di cookie (mis. setelah page reload) tanpa perlu login ulang. Response berisi `{ user: { username, namaLengkap, hakAkses } }`. Token tidak pernah dikembalikan ke client. Sesi tidak valid atau stale mengembalikan HTTP 401 dan gateway menghapus cookie secara otomatis.
+
 Payload `POST /api/users`: `{ username, password, namaLengkap, hakAkses }`.
 Payload `PUT /api/users/:username`: `{ namaLengkap, hakAkses }`.
 Payload `PUT /api/users/:username/password`: `{ newPassword }`.
@@ -53,7 +61,26 @@ Proteksi:
 - Self-delete dan self role downgrade ditolak.
 - Password minimum 8 karakter; disimpan `sha256$salt$hash` dengan `PASSWORD_PEPPER`.
 
-## Arsip Surat
+## Arsip Surat — Create Idempotency
+
+`POST /api/letters` mendukung field opsional `requestId` untuk idempotency client-side:
+
+```json
+{ "requestId": "550e8400-e29b-41d4-a716-446655440001", "nama": "...", ... }
+```
+
+- **Tanpa `requestId`**: perilaku lama — GAS membuat ID acak (`KGB-YYYY-<UUID>`), tidak ada garansi idempotency.
+- **Dengan `requestId`**: GAS menurunkan ID deterministik `KGB-YYYY-<requestId>` dan mengecek apakah row sudah ada dalam satu ScriptLock. Jika sudah ada, mengembalikan data existing tanpa append row baru. Jika belum ada, menggunakan ID deterministik dan append.
+- Response retry memiliki `idempotent: true` di envelope root (bukan di dalam `data`).
+- `requestId` divalidasi ketat: 1–100 karakter, hanya `[A-Za-z0-9\-_]` (alphanum, hyphens, underscores). Karakter lain (spasi, titik, slash, dll.) ditolak dengan HTTP 400.
+- Client tidak bisa memilih ID arbiter melalui field `id` dalam body — hanya `requestId` yang menentukan ID surat.
+- Idempotency di-handle di GAS (server-side). Gateway tidak me-retry mutation bahkan dengan `requestId`.
+
+### Catatan sesi GAS direct (Apps Script execute-as-owner)
+
+Ketika pengguna membuka langsung URL `doGet` GAS (bukan melalui Cloudflare), sesi dikelola via `localStorage` di browser. Karena GAS dijalankan sebagai pemilik script (`USER_DEPLOYING`), `UserProperties` atau `ScriptProperties` bersifat global (shared antar pengguna) dan tidak aman untuk menyimpan session per-user. Tidak ada perubahan backend untuk path ini — sesi di mode direct berbeda dan tidak perlu persistent session di server karena token ada di `localStorage` klien.
+
+## Arsip Surat — Konfigurasi Sheet
 
 Tambahkan Script Properties melalui **Project Settings → Script Properties**:
 
@@ -120,8 +147,8 @@ npm run verify:gas
 Output yang diharapkan:
 
 ```text
-✔ gasBackendVersion: 2.1.0 (sesuai source)
-✔ Semua 8 aksi dikenali oleh deployment aktif
+✔ gasBackendVersion: 2.5.0 (sesuai source)
+✔ Semua 14 aksi dikenali oleh deployment aktif
   VERIFIKASI BERHASIL — Deployment GAS aktif sudah up-to-date.
 ```
 
@@ -229,9 +256,11 @@ npm run verify:gas   # Verifikasi deployment GAS aktif: versi dan action routing
 - Manajemen user (list, create, update, reset password, delete) hanya dapat diakses role `admin`. Input `administrator` dinormalisasi ke `admin`.
 - Admin terakhir dilindungi dari downgrade role dan penghapusan. Self-delete dan self role downgrade juga ditolak.
 - Password existing disimpan dalam format kompatibel `sha256$salt$hash` dengan `PASSWORD_PEPPER`. `CONFIG_ERROR` dikembalikan bila pepper kosong, termasuk saat verifikasi password hash yang sudah ada. Jalankan `hashMasterUserPasswords()` dan audit agar tidak ada password plaintext sebelum produksi. Upgrade ke KDF adaptif berformat berversi tetap menjadi pekerjaan keamanan lanjutan; jangan menghapus kompatibilitas hash lama sebelum migrasi terukur selesai.
-- Token sesi untuk seluruh operasi terautentikasi (`letters.*` dan `users.*`) menyertakan `sv` (session version) — fingerprint deterministik dari `SHA-256(storedPasswordField + "|" + role).substring(0, 16)`. Setiap request memverifikasi `sv` dan role terhadap row live di sheet sehingga token lama tidak berlaku setelah reset password, perubahan role, atau delete. Token tanpa `sv` ditolak.
+- Token sesi untuk seluruh operasi terautentikasi (`letters.*`, `users.*`, dan `auth.session`) menyertakan `sv` (session version) — fingerprint deterministik dari `SHA-256(storedPasswordField + "|" + role).substring(0, 16)`. Setiap request memverifikasi `sv` dan role terhadap row live di sheet sehingga token lama tidak berlaku setelah reset password, perubahan role, atau delete. Token tanpa `sv` ditolak.
 - Username baru (`users.create`) divalidasi ketat: 1–64 karakter, hanya `[A-Za-z0-9._-]`, mulai huruf/digit, **tanpa truncation**. Username target (`update/resetPassword/delete`) divalidasi lebih permisif: 1–100 karakter, tanpa control chars, untuk mendukung legacy username dengan spasi.
 - Login throttle server-side memakai satu state Script Properties yang dibatasi maksimal 200 username-hash dan dilindungi `ScriptLock`; `CacheService` hanya optimasi. Username yang tidak terdaftar berbagi satu bucket sehingga flood nama acak tidak memenuhi state atau mengunci akun sah. Entry aktif tidak pernah dieviction untuk username baru. Penolakan throttle memakai respons publik yang sama dengan kredensial salah agar keberadaan username tidak dapat diidentifikasi dari status atau error code.
 - `validateUserSheet_` memeriksa minimal 4 kolom dan header A–D yang dikenali (case-insensitive, termasuk variasi legacy: `Hak Akses`, `role`, `Nama Lengkap`, dll). Sheet tanpa header menghasilkan `SCHEMA_ERROR`.
-- Gateway Cloudflare menghapus session cookie (`Max-Age=0`) saat upstream mengembalikan `AUTH_REQUIRED`, `SESSION_EXPIRED`, atau `INVALID_SESSION`.
+- Gateway Cloudflare menghapus session cookie (`Max-Age=0`) saat upstream mengembalikan `AUTH_REQUIRED`, `SESSION_EXPIRED`, atau `INVALID_SESSION`, termasuk pada endpoint `GET /api/auth/session`.
 - Endpoint GAS tetap publik secara jaringan agar dapat dipanggil Cloudflare, tetapi action HTTP ditolak tanpa shared secret dan session valid.
+- Gateway menggunakan timeout 28 detik untuk mengakomodasi GAS cold start. Safe/idempotent actions (`bootstrap.get`, `letters.list`, `users.list`, `auth.session`, `system.manifest`) di-retry sekali pada network abort atau upstream 502/503/504 dengan backoff 200ms. Login tidak pernah di-retry karena setiap attempt mengonsumsi throttle slot di GAS. Mutations tidak pernah di-retry.
+- Field `kabkot` tidak lagi wajib diisi pada create/update surat — empty string diterima dan disimpan di kolom yang benar. Field required lain tetap divalidasi.

@@ -1,11 +1,24 @@
 const MAX_PAYLOAD_BYTES = 64 * 1024;
-const UPSTREAM_TIMEOUT_MS = 10_000;
+const UPSTREAM_TIMEOUT_MS = 28_000;
+const RETRY_BACKOFF_MS = 200;
 const DEFAULT_SESSION_MAX_AGE = 8 * 60 * 60;
 const SESSION_COOKIE = "sipsid_session";
+
+// Actions that are safe to retry once on network abort / upstream 502-504.
+// Login is intentionally excluded: each attempt consumes a throttle slot on GAS.
+// Mutations (create, update, delete) must never be retried.
+const RETRYABLE_ACTIONS = new Set([
+  "bootstrap.get",
+  "letters.list",
+  "users.list",
+  "auth.session",
+  "system.manifest",
+]);
 
 const ROUTES = new Map([
   ["POST /api/auth/login", { action: "auth.login", body: true, mutation: true }],
   ["POST /api/auth/logout", { action: "auth.logout", body: true, mutation: true }],
+  ["GET /api/auth/session", { action: "auth.session" }],
   ["GET /api/bootstrap", { action: "bootstrap.get" }],
   ["GET /api/letters", { action: "letters.list" }],
   ["POST /api/letters", { action: "letters.create", body: true, mutation: true }],
@@ -196,6 +209,10 @@ export function normalizeGasResponse(value) {
   // yang berjalan dengan versi source yang diharapkan, tanpa mengkontaminasi data.
   const gasBackendVersion = typeof value.gasBackendVersion === "string" ? value.gasBackendVersion : undefined;
 
+  // idempotent: true is set by GAS when a letters.create with requestId finds an existing row.
+  // Pass it through the envelope so the client agent can distinguish first-create from replay.
+  const idempotent = value.idempotent === true ? true : undefined;
+
   const failed = value.ok === false || (typeof value.status === "string" && value.status.toLowerCase() !== "success");
   if (failed) {
     const rawCode = typeof value.error?.code === "string"
@@ -221,6 +238,7 @@ export function normalizeGasResponse(value) {
   if (Object.hasOwn(value, "data")) {
     const result = { ok: true, data: sanitizeClientValue(value.data), error: null };
     if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+    if (idempotent !== undefined) result.idempotent = idempotent;
     return result;
   }
   const data = { ...value };
@@ -229,8 +247,10 @@ export function normalizeGasResponse(value) {
   delete data.error;
   delete data.errorMsg;
   delete data.gasBackendVersion;
+  delete data.idempotent;
   const result = { ok: true, data: sanitizeClientValue(data), error: null };
   if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+  if (idempotent !== undefined) result.idempotent = idempotent;
   return result;
 }
 
@@ -297,26 +317,49 @@ export async function handleRequest(context, fetchImpl = fetch) {
   }
 
   const sessionToken = parseCookies(request.headers.get("Cookie"))[SESSION_COOKIE] || "";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const gasBody = JSON.stringify({
+    action: route.action,
+    payload,
+    sessionToken,
+    apiSecret: config.apiSecret,
+  });
+
+  const canRetry = RETRYABLE_ACTIONS.has(route.action);
   let upstreamResponse;
-  try {
-    upstreamResponse = await fetchImpl(config.gasUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: route.action,
-        payload,
-        sessionToken,
-        apiSecret: config.apiSecret,
-      }),
-      redirect: "follow",
-      signal: controller.signal,
-    });
-  } catch {
+  let lastFetchError;
+
+  for (let attempt = 0; attempt <= (canRetry ? 1 : 0); attempt++) {
+    if (attempt > 0) {
+      // Small backoff before retry to avoid hammering a recovering GAS instance.
+      await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    try {
+      upstreamResponse = await fetchImpl(config.gasUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: gasBody,
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      lastFetchError = null;
+      // Retry on upstream 502/503/504 for safe actions only.
+      if (canRetry && attempt === 0 && (upstreamResponse.status === 502 || upstreamResponse.status === 503 || upstreamResponse.status === 504)) {
+        lastFetchError = new Error(`upstream ${upstreamResponse.status}`);
+        continue;
+      }
+      break;
+    } catch (err) {
+      lastFetchError = err;
+      upstreamResponse = null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (!upstreamResponse) {
     return errorResponse(504, "upstream_unavailable", "Layanan tidak dapat dihubungi.");
-  } finally {
-    clearTimeout(timeout);
   }
 
   let upstream;
@@ -340,6 +383,9 @@ export async function handleRequest(context, fetchImpl = fetch) {
       delete normalized.data.expiresIn;
     }
   } else if (route.action === "auth.logout") {
+    headers["Set-Cookie"] = clearSessionCookie();
+  } else if (route.action === "auth.session" && !normalized.ok && isSessionInvalidCode(normalized.error?.code)) {
+    // Invalid session on session restore: clear cookie so browser stops sending it.
     headers["Set-Cookie"] = clearSessionCookie();
   } else if (!normalized.ok && isSessionInvalidCode(normalized.error?.code)) {
     // Clear the stale session cookie so the browser does not keep sending it.
