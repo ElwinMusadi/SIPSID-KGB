@@ -663,6 +663,18 @@ Pemeriksaan pra-cutover (read-only kecuali flag Pages yang belum berefek):
 
 **Aturan pemulihan import remote:** jangan pernah menjalankan ulang import secara buta. Jika import gagal atau hasilnya tidak diketahui, hitung baris lebih dulu. Bila jumlah sudah sama dengan manifest, jalankan hanya verifikasi ekspor ke folder baru. Bila parsial, `time-travel restore` ke **bookmark 1**, lalu import ulang dengan folder `seed` yang **sama** (jangan menjalankan `prepare` ulang ke folder kerja yang sama).
 
+#### Log eksekusi cutover (2026-10-15)
+
+| Waktu (UTC) | Langkah | Hasil |
+|---|---|---|
+| ±12:00 | Pepper Pages produksi diset pemilik; `hashMasterUserPasswords()` dijalankan; freeze GAS aktif | Mutasi legacy `503 maintenance`, pembacaan tetap 200 |
+| 12:08 | Ekspor CSV baru → audit + transformasi (`migratedAt` `2026-10-15T12:08:53.842Z`, manifest SHA-256 `d391383e…74cf0f`) | Audit 0 blocking; READY 15 user / 45 surat / 1.056 gaji; karantina 0; 4 peringatan NIP non-standar |
+| 12:10 | Schema + import ke D1 produksi | Import users sukses tetapi output JSON remote diawali baris progres sehingga tidak terbaca. Sesuai aturan pemulihan: dihitung dulu (users 15/15, lainnya 0), lalu hanya tabel kosong yang dilanjutkan → salary 1.056/1.056, letters 45/45. Tidak ada import ulang ke tabel berisi |
+| 12:12 | Verifikasi ekspor remote `--manifest` | Jumlah, agregat, dan checksum ketiga tabel cocok; tidak ada user perlu reset password |
+| 12:12 | Time Travel **bookmark 2** (berisi data, sebelum go-live) | `00000002-00000030-00005105-34aaeafeba1303d865e3259368999fa0` |
+| 12:13 | Fast-forward `main` `c6bafd4 → d9eff2a` (commit yang sama dengan branch migrasi yang diuji) | Deployment produksi `2e58d062-d3ad-4839-b899-05b01146bcb8` sukses |
+| 12:20 | Verifikasi produksi | `backendVersion 3.0.0`; master gaji 530 PNS / 526 PPPK; mutasi `503 maintenance`; probe pepper `400 invalid_credentials`; sesi anonim 401 |
+
 **Probe pepper:** setelah deployment D1, `POST /api/auth/login` dengan username yang tidak ada harus menghasilkan `400 invalid_credentials`. `502 config_error` berarti pepper belum terpasang. Kebenaran nilai pepper hanya dibuktikan oleh login pemilik.
 
 ### 11.1 Cutover
