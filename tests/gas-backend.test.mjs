@@ -3217,7 +3217,653 @@ test("create idempotent via dispatchHttpAction_: requestId diteruskan dari paylo
   assert.equal(r1.data.id, r2.data.id);
 });
 
-test("GAS_BACKEND_VERSION adalah 2.5.1 setelah idempotency contract", () => {
+test("GAS_BACKEND_VERSION adalah 2.5.3 setelah session-stage diagnostics dan marker kode", () => {
   const { ctx } = createGasEnv();
-  assert.equal(ctx.GAS_BACKEND_VERSION, "2.5.1");
+  assert.equal(ctx.GAS_BACKEND_VERSION, "2.5.3");
+});
+
+// ─── v2.5.2: bounded letter lock + staged storage diagnostics ──────────────
+
+const RAW_PROTECTED = "You are trying to edit a protected cell or object. Please contact the spreadsheet owner. secret-raw-xyz";
+const RAW_DATA_VALIDATION = "The data you entered in cell D2 violates the data validation rules set on this cell. secret-raw-xyz";
+const RAW_SERVICE = "Service Spreadsheets timed out while accessing document with id 1ZwZRVDmgYiv. secret-raw-xyz";
+const RAW_UNKNOWN = "Exception: something odd happened secret-raw-xyz";
+const RAW_LOCK = "Lock timeout: another process was holding the lock for too long. secret-raw-xyz";
+const REF_PATTERN = /\(Kode: ([A-Z_]+); Ref: ([A-Z0-9]{8})\)$/;
+
+function captureConsole(ctx) {
+  const logs = { error: [], info: [], warn: [] };
+  ctx.console = {
+    error: (...args) => logs.error.push(args.map(String).join(" ")),
+    info: (...args) => logs.info.push(args.map(String).join(" ")),
+    warn: (...args) => logs.warn.push(args.map(String).join(" ")),
+    log: () => {},
+  };
+  return logs;
+}
+
+function failingLockService(lockState, message = RAW_LOCK) {
+  return {
+    getScriptLock: () => ({
+      waitLock: () => { lockState.waitLockCalled++; throw new Error(message); },
+      hasLock: () => lockState.held,
+      releaseLock: () => { lockState.held = false; lockState.releaseLockCalled++; },
+    }),
+  };
+}
+
+function setFlush(ctx, fn) {
+  ctx.SpreadsheetApp = { openById: ctx.SpreadsheetApp.openById, flush: fn };
+}
+
+function expectStorageError(fn, code, stage) {
+  let caught;
+  try { fn(); } catch (err) { caught = err; }
+  assert.ok(caught, "Harus melempar error");
+  assert.equal(caught.code, code);
+  if (stage) assert.equal(caught.stage, stage);
+  assert.doesNotMatch(caught.message, /secret-raw-xyz|protected cell|timed out|data validation rules|Exception:/i,
+    "Pesan klien tidak boleh memuat raw exception");
+  const match = caught.message.match(REF_PATTERN);
+  assert.ok(match, "Pesan harus diakhiri (Kode: X; Ref: Y)");
+  assert.equal(match[1], code);
+  assert.equal(match[2], caught.ref);
+  assert.equal(caught.stack && caught.stack.includes("secret-raw-xyz"), false);
+  return caught;
+}
+
+function assertSafeLogs(logs, { ref, stage, operation, actor, token }) {
+  const line = logs.error.find((l) => l.includes(ref));
+  assert.ok(line, "Log server harus memuat ref");
+  const json = JSON.parse(line.slice(line.indexOf("{")));
+  assert.equal(json.ref, ref);
+  assert.equal(json.stage, stage);
+  assert.equal(json.operation, operation);
+  assert.equal(json.actor, actor);
+  assert.equal(typeof json.reason, "string");
+  assert.equal(json.errorMessage, undefined, "Log tidak boleh memuat error.message");
+  assert.equal(json.stack, undefined, "Log tidak boleh memuat raw stack");
+  assert.ok(Array.isArray(json.frames));
+  const all = logs.error.join("\n") + logs.info.join("\n") + logs.warn.join("\n");
+  assert.equal(all.includes("secret-raw-xyz"), false, "Raw exception message tidak boleh masuk log");
+  for (const forbidden of ["Petrus Kanisius", "198001012005011001", "821/02/KGB/2024", "sha256$", "test-pepper", "session-secret", "test-secret-123"]) {
+    assert.equal(all.includes(forbidden), false, `Log tidak boleh memuat ${forbidden}`);
+  }
+  if (token) assert.equal(all.includes(token), false, "Log tidak boleh memuat session token");
+}
+
+test("acquireLetterLock_: waitLock dibatasi 10 detik (< timeout gateway 28 detik)", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const timeouts = [];
+  const state = { held: false };
+  ctx.LockService = {
+    getScriptLock: () => ({
+      waitLock: (ms) => { timeouts.push(ms); state.held = true; },
+      hasLock: () => state.held,
+      releaseLock: () => { state.held = false; },
+    }),
+  };
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload());
+  ctx.apiUpdateLetter(token, created.data.id, sampleLetterPayload({ nama: "X" }));
+  ctx.apiDeleteLetter(token, created.data.id);
+  assert.deepEqual(timeouts, [10000, 10000, 10000]);
+  assert.ok(ctx.LETTER_LOCK_TIMEOUT_MS_ < 28000);
+  assert.equal(state.held, false);
+});
+
+test("lock gagal: BUSY aman, tidak ada write/flush untuk create/update/delete, lock dilepas", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload());
+  const snapshot = JSON.stringify(letterSheet.rows);
+
+  const logs = captureConsole(ctx);
+  ctx.LockService = failingLockService(lockState);
+  let flushCalls = 0;
+  setFlush(ctx, () => { flushCalls++; });
+  let appendCalls = 0;
+  letterSheet.appendRow = () => { appendCalls++; };
+  letterSheet.deleteRow = () => { throw new Error("deleteRow must not be called"); };
+
+  const busyCreate = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "busy-req-001" })), "BUSY", "lock");
+  const busyUpdate = expectStorageError(() => ctx.apiUpdateLetter(token, created.data.id, sampleLetterPayload({ nama: "Y" })), "BUSY", "lock");
+  const busyDelete = expectStorageError(() => ctx.apiDeleteLetter(token, created.data.id), "BUSY", "lock");
+
+  assert.match(busyCreate.message, /belum diubah/);
+  assert.equal(appendCalls, 0, "Tidak boleh append saat BUSY");
+  assert.equal(flushCalls, 0, "Tidak boleh flush saat BUSY");
+  assert.equal(JSON.stringify(letterSheet.rows), snapshot, "Sheet tidak berubah saat BUSY");
+  assert.equal(lockState.held, false);
+  for (const [err, operation] of [[busyCreate, "create"], [busyUpdate, "update"], [busyDelete, "delete"]]) {
+    assertSafeLogs(logs, { ref: err.ref, stage: "lock", operation, actor: "admin", token });
+  }
+});
+
+test("create: appendRow ditolak proteksi -> DATA_WRITE_DENIED, sekali percobaan, lock dilepas, tanpa bocor", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  let appendCalls = 0;
+  let flushCalls = 0;
+  letterSheet.appendRow = () => { appendCalls++; throw new Error(RAW_PROTECTED); };
+  setFlush(ctx, () => { flushCalls++; });
+
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_DENIED", "write");
+  assert.match(err.message, /izin edit|dilindungi/);
+  assert.equal(appendCalls, 1, "appendRow tidak boleh di-retry");
+  assert.equal(flushCalls, 0, "flush tidak dipanggil setelah write gagal");
+  assert.equal(lockState.held, false);
+  assert.equal(letterSheet.rows.length, 1);
+  assertSafeLogs(logs, { ref: err.ref, stage: "write", operation: "create", actor: "staff", token });
+});
+
+test("update: setValues ditolak data validation -> DATA_VALIDATION_ERROR, row tidak berubah, lock dilepas", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload());
+  const before = JSON.stringify(letterSheet.rows);
+  const logs = captureConsole(ctx);
+
+  const originalGetRange = letterSheet.getRange.bind(letterSheet);
+  let setValuesCalls = 0;
+  letterSheet.getRange = (...args) => {
+    const range = originalGetRange(...args);
+    return { ...range, setValues: () => { setValuesCalls++; throw new Error(RAW_DATA_VALIDATION); } };
+  };
+
+  const err = expectStorageError(
+    () => ctx.apiUpdateLetter(token, created.data.id, sampleLetterPayload({ nama: "Baru" })),
+    "DATA_VALIDATION_ERROR", "write");
+  assert.match(err.message, /aturan validasi data/);
+  assert.equal(setValuesCalls, 1, "setValues tidak boleh di-retry");
+  assert.equal(JSON.stringify(letterSheet.rows), before);
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "write", operation: "update", actor: "admin", token });
+});
+
+test("unclassified write exception -> DATA_WRITE_FAILED tanpa raw message", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw new Error(RAW_UNKNOWN); };
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_FAILED", "write");
+  assert.match(err.message, /belum dapat dipastikan/);
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "write", operation: "create", actor: "staff", token });
+});
+
+test("flush gagal setelah append sukses: DATA_SERVICE_UNAVAILABLE stage flush, pesan status tidak pasti, tanpa retry", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  let flushCalls = 0;
+  setFlush(ctx, () => { flushCalls++; throw new Error(RAW_SERVICE); });
+
+  const err = expectStorageError(
+    () => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "flush-fail-req-001" })),
+    "DATA_SERVICE_UNAVAILABLE", "flush");
+  assert.match(err.message, /belum dapat dipastikan/);
+  assert.match(err.message, /tidak akan membuat data ganda/);
+  assert.doesNotMatch(err.message, /tidak tersimpan|gagal disimpan/i, "Tidak boleh menyatakan data pasti tidak tersimpan");
+  assert.equal(flushCalls, 1, "flush tidak boleh di-retry");
+  assert.equal(letterSheet.rows.length, 2, "Row hasil append tetap ada (mungkin sudah commit)");
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "flush", operation: "create", actor: "staff", token });
+});
+
+test("retry requestId sama setelah append sukses + flush gagal menghasilkan tepat satu row (idempotent)", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const requestId = "append-ok-flush-fail-001";
+
+  setFlush(ctx, () => { throw new Error(RAW_SERVICE); });
+  assert.throws(() => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId })),
+    (err) => err.code === "DATA_SERVICE_UNAVAILABLE");
+  assert.equal(letterSheet.rows.length, 2);
+
+  setFlush(ctx, () => {});
+  const retry = ctx.apiCreateLetter(token, sampleLetterPayload({ requestId }));
+  assert.equal(retry.status, "success");
+  assert.equal(retry.idempotent, true);
+  assert.equal(letterSheet.rows.length, 2, "Retry dengan requestId sama tidak boleh menambah row");
+  assert.equal(letterSheet.rows.filter((r) => r[1] === retry.data.id).length, 1);
+});
+
+test("update flush gagal: status tidak pasti dan stage flush teridentifikasi", () => {
+  const { ctx, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload());
+  const logs = captureConsole(ctx);
+  setFlush(ctx, () => { throw new Error(RAW_UNKNOWN); });
+  const err = expectStorageError(
+    () => ctx.apiUpdateLetter(token, created.data.id, sampleLetterPayload({ nama: "Z" })),
+    "DATA_WRITE_FAILED", "flush");
+  assert.match(err.message, /Status pembaruan belum dapat dipastikan/);
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "flush", operation: "update", actor: "admin", token });
+});
+
+test("delete: deleteRow ditolak dan flush gagal dipetakan aman dengan lock dilepas", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(token, sampleLetterPayload());
+  const logs = captureConsole(ctx);
+
+  const originalDelete = letterSheet.deleteRow.bind(letterSheet);
+  let deleteCalls = 0;
+  letterSheet.deleteRow = () => { deleteCalls++; throw new Error(RAW_PROTECTED); };
+  const denied = expectStorageError(() => ctx.apiDeleteLetter(token, created.data.id), "DATA_WRITE_DENIED", "write");
+  assert.equal(deleteCalls, 1);
+  assert.equal(letterSheet.rows.length, 2);
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: denied.ref, stage: "write", operation: "delete", actor: "admin", token });
+
+  letterSheet.deleteRow = originalDelete;
+  setFlush(ctx, () => { throw new Error(RAW_SERVICE); });
+  const uncertain = expectStorageError(() => ctx.apiDeleteLetter(token, created.data.id), "DATA_SERVICE_UNAVAILABLE", "flush");
+  assert.match(uncertain.message, /Status penghapusan belum dapat dipastikan/);
+  assert.equal(lockState.held, false);
+});
+
+test("error read (Spreadsheet tidak dapat dibuka) di dalam lock: belum ada data diubah, lock dilepas", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  // requireCurrentSession_ (outside lock) succeeds; the in-lock open fails.
+  let opens = 0;
+  const originalOpen = ctx.SpreadsheetApp.openById;
+  ctx.SpreadsheetApp = {
+    flush: () => {},
+    openById: (...args) => {
+      opens++;
+      if (opens >= 2) throw new Error(RAW_SERVICE);
+      return originalOpen(...args);
+    },
+  };
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_SERVICE_UNAVAILABLE", "read");
+  assert.match(err.message, /Belum ada data yang diubah/);
+  assert.equal(letterSheet.rows.length, 1);
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "read", operation: "create", actor: "staff", token });
+});
+
+test("error domain/auth di dalam lock tidak dilabeli ulang sebagai storage error", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const staffToken = makeSessionToken(ctx, userSheet, "staff");
+  const adminToken = makeSessionToken(ctx, userSheet, "admin");
+  const created = ctx.apiCreateLetter(adminToken, sampleLetterPayload());
+
+  assert.throws(() => ctx.apiDeleteLetter(staffToken, created.data.id), (err) => err.code === "FORBIDDEN" && !err.ref);
+  letterSheet.setMaxColumns(10);
+  assert.throws(() => ctx.apiCreateLetter(adminToken, sampleLetterPayload()), (err) => err.code === "SCHEMA_ERROR" && !err.ref);
+  letterSheet.setMaxColumns(27);
+  userSheet.rows[2][1] = "sha256$changed$hash";
+  assert.throws(() => ctx.apiUpdateLetter(staffToken, created.data.id, sampleLetterPayload()), (err) => err.code === "AUTH_REQUIRED");
+  assert.equal(lockState.held, false);
+});
+
+test("doPost: storage error mengembalikan envelope lama dengan errorCode baru, tanpa raw message/stack", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw new Error(RAW_PROTECTED); };
+  const out = ctx.doPost({ postData: { contents: JSON.stringify({
+    apiSecret: "test-secret-123", action: "letters.create", sessionToken: token, payload: sampleLetterPayload(),
+  }) } });
+  const json = JSON.parse(out.getContent());
+  assert.deepEqual(Object.keys(json).sort(), ["errorCode", "errorMsg", "gasBackendVersion", "status"]);
+  assert.equal(json.status, "error");
+  assert.equal(json.errorCode, "DATA_WRITE_DENIED");
+  assert.equal(json.gasBackendVersion, "2.5.3");
+  assert.match(json.errorMsg, REF_PATTERN);
+  assert.doesNotMatch(out.getContent(), /secret-raw-xyz|protected cell|test-secret-123/);
+  assert.notEqual(json.errorMsg, "Layanan sedang mengalami kendala. Silakan coba kembali.");
+});
+
+test("classifySpreadsheetError_ memetakan pola izin, validasi, layanan sementara, dan lainnya", () => {
+  const { ctx } = createGasEnv();
+  assert.equal(ctx.classifySpreadsheetError_(new Error(RAW_PROTECTED)), "DATA_WRITE_DENIED");
+  assert.equal(ctx.classifySpreadsheetError_(new Error("You do not have permission to access the requested document.")), "DATA_WRITE_DENIED");
+  assert.equal(ctx.classifySpreadsheetError_(new Error("Anda mencoba mengedit sel atau objek yang dilindungi.")), "DATA_WRITE_DENIED");
+  assert.equal(ctx.classifySpreadsheetError_(new Error(RAW_DATA_VALIDATION)), "DATA_VALIDATION_ERROR");
+  assert.equal(ctx.classifySpreadsheetError_(new Error(RAW_SERVICE)), "DATA_SERVICE_UNAVAILABLE");
+  assert.equal(ctx.classifySpreadsheetError_(new Error("Service error: Spreadsheets")), "DATA_SERVICE_UNAVAILABLE");
+  assert.equal(ctx.classifySpreadsheetError_(new Error(RAW_UNKNOWN)), "DATA_WRITE_FAILED");
+  assert.equal(ctx.classifySpreadsheetError_(null), "DATA_WRITE_FAILED");
+});
+
+test("lock release tetap aman bila releaseLock melempar (error asli tidak tertutup)", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  captureConsole(ctx);
+  const state = { held: false, releases: 0 };
+  ctx.LockService = {
+    getScriptLock: () => ({
+      waitLock: () => { state.held = true; },
+      hasLock: () => state.held,
+      releaseLock: () => { state.releases++; state.held = false; throw new Error("release failed"); },
+    }),
+  };
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw new Error(RAW_PROTECTED); };
+  assert.throws(() => ctx.apiCreateLetter(token, sampleLetterPayload()), (err) => err.code === "DATA_WRITE_DENIED");
+  assert.equal(state.releases, 1);
+});
+
+test("create tanpa requestId saat flush gagal: tidak menyertakan jaminan anti-duplikasi", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  setFlush(ctx, () => { throw new Error(RAW_SERVICE); });
+
+  const err = expectStorageError(
+    () => ctx.apiCreateLetter(token, sampleLetterPayload()),
+    "DATA_SERVICE_UNAVAILABLE", "flush");
+  assert.match(err.message, /belum dapat dipastikan/);
+  assert.equal(err.message.includes("tidak akan membuat data ganda"), false,
+    "Non-idempotent create tidak boleh menjamin formulir ulang aman dari duplikasi");
+  assert.equal(letterSheet.rows.length, 2);
+  assert.equal(lockState.held, false);
+});
+
+test("acquireLetterLock_: LockService.getScriptLock throws -> BUSY, lock aman, tidak menyentuh sheet", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  captureConsole(ctx);
+  ctx.LockService = {
+    getScriptLock: () => { throw new Error("LockService backend unavailable"); },
+  };
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "BUSY", "lock");
+  assert.match(err.message, /belum diubah/);
+  assert.equal(letterSheet.rows.length, 1);
+  assert.equal(lockState.held, false);
+});
+
+test("classifySpreadsheetError_ mengenali pesan locale Indonesia untuk validasi dan layanan", () => {
+  const { ctx } = createGasEnv();
+  assert.equal(ctx.classifySpreadsheetError_(new Error("Nilai yang dimasukkan melanggar aturan validasi data pada sel")), "DATA_VALIDATION_ERROR");
+  assert.equal(ctx.classifySpreadsheetError_(new Error("Layanan spreadsheet sedang mengalami kendala sementara")), "DATA_SERVICE_UNAVAILABLE");
+  assert.equal(ctx.classifySpreadsheetError_(new Error("Waktu habis saat mengakses dokumen")), "DATA_SERVICE_UNAVAILABLE");
+});
+
+// ─── Redacted diagnostic logs (no raw message/stack) ───────────────────────
+
+function adversarialSheetError(token) {
+  const message =
+    'The data you entered in cell D2 ("Petrus Kanisius" NIP 198001012005011001 token=' + token + ') violates the data validation rules set on this cell.\n' +
+    "    at leaked (Petrus_Kanisius.gs:1:1)\n" +
+    "secret-raw-xyz";
+  const error = new Error(message);
+  error.stack = "Error: " + message + "\n" +
+    "    at appendRow (Code:440:11)\n" +
+    "    at createLetter_ (Code.gs:452:7)\n" +
+    '    at evil ("Petrus Kanisius":1:1)\n' +
+    "    at nip (/tmp/198001012005011001.gs:2:3)\n" +
+    "    at name with space (Code:1:1)\n" +
+    "    at Object.<anonymous> (/srv/app/Code.gs:12:3)\n" +
+    "    at Code:9:1\n" +
+    "Caused by: Petrus Kanisius " + token + "\n" +
+    "    at leaked (Petrus_Kanisius.gs:1:1)";
+  return error;
+}
+
+test("log diagnosis tidak memuat raw message/stack walau exception memuat NIP, nama, token, newline, frame palsu", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw adversarialSheetError(token); };
+
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_VALIDATION_ERROR", "write");
+  assert.equal(lockState.held, false);
+  assertSafeLogs(logs, { ref: err.ref, stage: "write", operation: "create", actor: "staff", token });
+
+  const all = logs.error.join("\n") + logs.warn.join("\n") + logs.info.join("\n");
+  for (const forbidden of ["Petrus", "Kanisius", "198001012005011001", "token=", "cell D2", "violates", "Caused by", "leaked", "evil", "/srv/app", "/tmp/"]) {
+    assert.equal(all.includes(forbidden), false, `Log tidak boleh memuat ${forbidden}`);
+  }
+  const json = JSON.parse(logs.error.find((l) => l.includes(err.ref)).replace(/^[^{]*/, ""));
+  assert.deepEqual(Object.keys(json).sort(),
+    ["actor", "code", "errorName", "frames", "id", "messageLength", "operation", "reason", "ref", "stage"]);
+  assert.equal(json.reason, "sheet_data_validation_rule");
+  assert.equal(json.errorName, "Error");
+  assert.equal(json.code, "DATA_VALIDATION_ERROR");
+  assert.deepEqual(json.frames, ["appendRow@Code:440:11", "createLetter_@Code.gs:452:7", "Object.<anonymous>@Code.gs:12:3", "Code:9:1"]);
+  assert.ok(json.messageLength > 0);
+});
+
+test("safeStackFrames_: hanya frame fungsi/lokasi:baris:kolom; header, teks berkutip, dan non-string ditolak", () => {
+  const { ctx } = createGasEnv();
+  assert.deepEqual(Array.from(ctx.safeStackFrames_(null)), []);
+  assert.deepEqual(Array.from(ctx.safeStackFrames_({ stack: 42 })), []);
+  assert.deepEqual(Array.from(ctx.safeStackFrames_("raw string error")), []);
+  const e = new Error("single line 198001012005011001");
+  e.stack = "Error: single line 198001012005011001\n    at fn (Code:1:2)\n    at 'quoted' (Code:3:4)\n    at fn2 (Code:5)";
+  assert.deepEqual(Array.from(ctx.safeStackFrames_(e)), ["fn@Code:1:2", "fn2@Code:5"]);
+  const many = new Error("x");
+  many.stack = "Error: x\n" + Array.from({ length: 30 }, (_, i) => `    at f${i} (Code:${i + 1}:1)`).join("\n");
+  assert.equal(ctx.safeStackFrames_(many).length, 10, "Frame dibatasi");
+});
+
+test("errorName di luar allowlist dan error non-Error dicatat sebagai label tetap", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+
+  letterSheet.appendRow = () => {
+    const custom = new Error("Petrus Kanisius 198001012005011001");
+    custom.name = "Petrus Kanisius 198001012005011001";
+    throw custom;
+  };
+  const e1 = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_FAILED", "write");
+  letterSheet.appendRow = () => { throw "Petrus Kanisius 198001012005011001 plain string"; };
+  const e2 = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_FAILED", "write");
+
+  const parse = (ref) => JSON.parse(logs.error.find((l) => l.includes(ref)).replace(/^[^{]*/, ""));
+  assert.equal(parse(e1.ref).errorName, "Other");
+  assert.equal(parse(e2.ref).errorName, "Other");
+  assert.equal(parse(e2.ref).messageLength, 0);
+  assert.deepEqual(parse(e2.ref).frames, []);
+  assert.equal(logs.error.join("\n").includes("Petrus"), false);
+  assert.equal(logs.error.join("\n").includes("198001012005011001"), false);
+});
+
+test("releaseLetterLock_ gagal hanya mencatat kode tetap LOCK_RELEASE_FAILED tanpa raw error", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const state = { held: false };
+  ctx.LockService = {
+    getScriptLock: () => ({
+      waitLock: () => { state.held = true; },
+      hasLock: () => state.held,
+      releaseLock: () => { state.held = false; throw new Error("release failed Petrus Kanisius 198001012005011001"); },
+    }),
+  };
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const res = ctx.apiCreateLetter(token, sampleLetterPayload());
+  assert.equal(res.status, "success");
+  assert.equal(logs.warn.length, 1);
+  assert.equal(logs.warn[0], 'Letter lock release failed {"code":"LOCK_RELEASE_FAILED"}');
+});
+
+// ─── v2.5.3: session-stage diagnostics + "(Kode: CODE)" marker at API boundary ─
+
+const FRONTEND_MARKER = (() => {
+  const html = fs.readFileSync(resolve(root, "Index.html"), "utf8");
+  const match = html.match(/const EMBEDDED_ERROR_MARKER = (\/.+\/);/);
+  assert.ok(match, "Index.html harus mendefinisikan EMBEDDED_ERROR_MARKER");
+  return vm.runInNewContext(match[1]);
+})();
+
+function countMarkers(message) {
+  return (String(message).match(/\(Kode: /g) || []).length;
+}
+
+function failOpenById(ctx, failFromCall, message) {
+  const originalOpen = ctx.SpreadsheetApp.openById;
+  let calls = 0;
+  ctx.SpreadsheetApp = {
+    flush: ctx.SpreadsheetApp.flush,
+    openById: (...args) => {
+      calls++;
+      if (calls >= failFromCall) throw new Error(message);
+      return originalOpen(...args);
+    },
+  };
+}
+
+test("session stage: Spreadsheet gagal dibuka sebelum lock -> kode aman + Ref, tanpa raw, tanpa lock, tanpa row", () => {
+  for (const [op, call] of [
+    ["create", (ctx, token) => ctx.apiCreateLetter(token, sampleLetterPayload({ requestId: "sess-fail-001" }))],
+    ["update", (ctx, token) => ctx.apiUpdateLetter(token, "KGB-2026-abc", sampleLetterPayload())],
+    ["delete", (ctx, token) => ctx.apiDeleteLetter(token, "KGB-2026-abc")],
+  ]) {
+    const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+    const logs = captureConsole(ctx);
+    const token = makeSessionToken(ctx, userSheet, "admin");
+    const snapshot = JSON.stringify(letterSheet.rows);
+    failOpenById(ctx, 1, RAW_SERVICE + " Petrus Kanisius 198001012005011001");
+
+    const err = expectStorageError(() => call(ctx, token), "DATA_SERVICE_UNAVAILABLE", "session");
+    assert.match(err.message, /Belum ada data yang diubah/);
+    assert.equal(countMarkers(err.message), 1, "Marker tidak boleh ganda");
+    assert.equal(lockState.waitLockCalled, 0, `${op}: lock tidak boleh diambil`);
+    assert.equal(JSON.stringify(letterSheet.rows), snapshot, `${op}: sheet tidak berubah`);
+
+    const line = logs.error.find((l) => l.includes(err.ref));
+    const json = JSON.parse(line.replace(/^[^{]*/, ""));
+    assert.equal(json.stage, "session");
+    assert.equal(json.operation, op);
+    assert.equal(json.actor, "", "Actor kosong sebelum sesi terverifikasi");
+    assert.equal(logs.error.join("\n").includes("Petrus"), false);
+    assert.equal(logs.error.join("\n").includes("198001012005011001"), false);
+    assert.equal(logs.error.join("\n").includes(token), false);
+  }
+});
+
+test("session stage: Master_User read gagal (getDataRange raw) -> DATA_WRITE_DENIED terkontrol, tanpa row", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  userSheet.getDataRange = () => { throw new Error("You do not have permission to access the requested document. 198001012005011001"); };
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_DENIED", "session");
+  assert.doesNotMatch(err.message, /198001012005011001/);
+  assert.equal(lockState.waitLockCalled, 0);
+  assert.equal(letterSheet.rows.length, 1);
+});
+
+test("actor tercatat setelah sesi terverifikasi (log stage write memuat actor)", () => {
+  const { ctx, letterSheet, userSheet } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw new Error(RAW_PROTECTED); };
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_WRITE_DENIED", "write");
+  assert.equal(JSON.parse(logs.error.find((l) => l.includes(err.ref)).replace(/^[^{]*/, "")).actor, "staff");
+});
+
+test("wrapper letter API: VALIDATION_ERROR/AUTH_REQUIRED/FORBIDDEN dipertahankan + marker (Kode: CODE), domain internal tidak berubah", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const adminToken = makeSessionToken(ctx, userSheet, "admin");
+  const staffToken = makeSessionToken(ctx, userSheet, "staff");
+  const created = ctx.apiCreateLetter(adminToken, sampleLetterPayload());
+  const snapshot = JSON.stringify(letterSheet.rows);
+
+  const cases = [
+    [() => ctx.apiCreateLetter(adminToken, sampleLetterPayload({ skTanggal: "2024-02-30" })), "VALIDATION_ERROR", /^Format tanggal skTanggal tidak valid\. \(Kode: VALIDATION_ERROR\)$/],
+    [() => ctx.apiCreateLetter(adminToken, sampleLetterPayload({ requestId: "bad id" })), "VALIDATION_ERROR", /^requestId tidak valid.*\(Kode: VALIDATION_ERROR\)$/],
+    [() => ctx.apiUpdateLetter(adminToken, "   ", sampleLetterPayload()), "VALIDATION_ERROR", /^ID surat tidak valid\. \(Kode: VALIDATION_ERROR\)$/],
+    [() => ctx.apiCreateLetter("", sampleLetterPayload()), "AUTH_REQUIRED", /^Sesi tidak valid\. Silakan login kembali\. \(Kode: AUTH_REQUIRED\)$/],
+    [() => ctx.apiUpdateLetter(makeTokenNoSv(ctx, "admin", "admin"), created.data.id, sampleLetterPayload()), "AUTH_REQUIRED", /\(Kode: AUTH_REQUIRED\)$/],
+    [() => ctx.apiDeleteLetter(staffToken, created.data.id), "FORBIDDEN", /^Hanya administrator yang dapat menghapus arsip\. \(Kode: FORBIDDEN\)$/],
+  ];
+  for (const [fn, code, pattern] of cases) {
+    let caught;
+    try { fn(); } catch (err) { caught = err; }
+    assert.ok(caught, `${code} harus dilempar`);
+    assert.equal(caught.code, code);
+    assert.match(caught.message, pattern);
+    assert.equal(countMarkers(caught.message), 1);
+    assert.equal(caught.ref, undefined, "Error domain tidak diberi Ref storage");
+    const parsed = caught.message.match(FRONTEND_MARKER);
+    assert.ok(parsed, "Parser frontend harus mengenali marker");
+    assert.equal(parsed[1], code);
+  }
+  assert.equal(JSON.stringify(letterSheet.rows), snapshot, "Tidak ada row berubah");
+  assert.equal(lockState.held, false);
+
+  // Domain helpers keep original messages (no marker) for internal callers.
+  assert.throws(() => ctx.validateAndNormalizeLetter_(sampleLetterPayload({ skTanggal: "2024-02-30" })),
+    (err) => err.message === "Format tanggal skTanggal tidak valid.");
+  assert.throws(() => ctx.requireSession_(""), (err) => err.message === "Sesi tidak valid. Silakan login kembali.");
+});
+
+test("marker storage error (Kode; Ref) tidak digandakan oleh wrapper dan dikenali parser frontend", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  letterSheet.appendRow = () => { throw new Error(RAW_DATA_VALIDATION); };
+  const writeErr = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "DATA_VALIDATION_ERROR", "write");
+  assert.equal(countMarkers(writeErr.message), 1);
+  const parsed = writeErr.message.match(FRONTEND_MARKER);
+  assert.equal(parsed[1], "DATA_VALIDATION_ERROR");
+  assert.equal(parsed[2], writeErr.ref);
+
+  ctx.LockService = failingLockService(lockState);
+  const busy = expectStorageError(() => ctx.apiCreateLetter(token, sampleLetterPayload()), "BUSY", "lock");
+  assert.equal(countMarkers(busy.message), 1);
+});
+
+test("raw exception di luar stage (mis. getter payload) dikonversi di boundary: kode aman + Ref, tanpa raw", () => {
+  const { ctx, letterSheet, userSheet, lockState } = createGasEnv();
+  const logs = captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const payload = sampleLetterPayload();
+  Object.defineProperty(payload, "nama", { enumerable: true, get() { throw new Error("getter boom Petrus Kanisius secret-raw-xyz"); } });
+  const err = expectStorageError(() => ctx.apiCreateLetter(token, payload), "DATA_WRITE_FAILED", "internal");
+  assert.equal(countMarkers(err.message), 1);
+  assert.equal(letterSheet.rows.length, 1);
+  assert.equal(lockState.held, false);
+  const json = JSON.parse(logs.error.find((l) => l.includes(err.ref)).replace(/^[^{]*/, ""));
+  assert.equal(json.stage, "internal");
+  assert.equal(json.actor, "staff");
+  assert.equal(logs.error.join("\n").includes("Petrus"), false);
+});
+
+test("doPost: session-stage failure dan error domain membawa marker aman di errorMsg, envelope tetap", () => {
+  const { ctx, userSheet } = createGasEnv();
+  captureConsole(ctx);
+  const token = makeSessionToken(ctx, userSheet, "staff");
+  const post = (action, payload) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify({
+    apiSecret: "test-secret-123", action, sessionToken: token, payload,
+  }) } }).getContent());
+
+  const validation = post("letters.create", sampleLetterPayload({ nip: "" }));
+  assert.deepEqual(Object.keys(validation).sort(), ["errorCode", "errorMsg", "gasBackendVersion", "status"]);
+  assert.equal(validation.errorCode, "VALIDATION_ERROR");
+  assert.equal(validation.errorMsg, "Field nip wajib diisi. (Kode: VALIDATION_ERROR)");
+
+  // CLOUDFLARE_API_SECRET check passes (Properties), then Master_User open fails.
+  failOpenById(ctx, 1, RAW_SERVICE);
+  const sessionFail = post("letters.update", sampleLetterPayload({ id: "KGB-2026-abc" }));
+  assert.equal(sessionFail.errorCode, "DATA_SERVICE_UNAVAILABLE");
+  assert.match(sessionFail.errorMsg, /Belum ada data yang diubah\. \(Kode: DATA_SERVICE_UNAVAILABLE; Ref: [A-Z0-9]{8}\)$/);
+  assert.doesNotMatch(JSON.stringify(sessionFail), /secret-raw-xyz|timed out/);
+  assert.notEqual(sessionFail.errorMsg, "Layanan sedang mengalami kendala. Silakan coba kembali.");
+});
+
+test("not_found update/delete menyertakan errorCode NOT_FOUND", () => {
+  const { ctx, userSheet } = createGasEnv();
+  const token = makeSessionToken(ctx, userSheet, "admin");
+  const emptyUpdate = ctx.apiUpdateLetter(token, "KGB-2026-missing", sampleLetterPayload());
+  assert.equal(emptyUpdate.status, "not_found");
+  assert.equal(emptyUpdate.errorCode, "NOT_FOUND");
+  const emptyDelete = ctx.apiDeleteLetter(token, "KGB-2026-missing");
+  assert.equal(emptyDelete.errorCode, "NOT_FOUND");
+
+  ctx.apiCreateLetter(token, sampleLetterPayload());
+  const missingUpdate = ctx.apiUpdateLetter(token, "KGB-2026-missing", sampleLetterPayload());
+  assert.equal(missingUpdate.status, "not_found");
+  assert.equal(missingUpdate.errorCode, "NOT_FOUND");
+  const missingDelete = ctx.apiDeleteLetter(token, "KGB-2026-missing");
+  assert.equal(missingDelete.errorCode, "NOT_FOUND");
 });

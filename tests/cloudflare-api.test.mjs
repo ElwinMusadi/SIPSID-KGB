@@ -1258,6 +1258,69 @@ test("POST /api/letters meneruskan requestId dari body ke GAS payload tanpa modi
   assert.equal(body.idempotent, true, "idempotent:true harus ada di envelope root Cloudflare");
 });
 
+// ─── Gateway: GAS v2.5.2 storage error codes ───────────────────────────────
+
+const STORAGE_CASES = [
+  { code: "BUSY", status: 503 },
+  { code: "DATA_WRITE_DENIED", status: 403 },
+  { code: "WRITE_FORBIDDEN", status: 403 },
+  { code: "DATA_VALIDATION_ERROR", status: 422 },
+  { code: "DATA_SERVICE_UNAVAILABLE", status: 503 },
+  { code: "DATA_WRITE_FAILED", status: 502 },
+];
+
+const MUTATION_REQUESTS = [
+  () => request("/api/letters", {
+    method: "POST",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", Cookie: "sipsid_session=tok" },
+    body: JSON.stringify({ requestId: "req-1", nama: "Test" }),
+  }),
+  () => request("/api/letters/KGB-2026-abc", {
+    method: "PUT",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", Cookie: "sipsid_session=tok" },
+    body: JSON.stringify({ nama: "Test" }),
+  }),
+  () => request("/api/letters/KGB-2026-abc", {
+    method: "DELETE",
+    headers: { Origin: "https://app.example", Cookie: "sipsid_session=tok" },
+  }),
+];
+
+for (const { code, status } of STORAGE_CASES) {
+  test(`storage error ${code} dipetakan ke HTTP ${status}, envelope tetap, mutasi tidak di-retry`, async () => {
+    for (const makeRequest of MUTATION_REQUESTS) {
+      let callCount = 0;
+      const errorMsg = `Pesan aman. (Kode: ${code}; Ref: AB12CD34)`;
+      const response = await handleRequest({ request: makeRequest(), env }, async () => {
+        callCount++;
+        return gasResponse({ status: "error", errorCode: code, errorMsg, gasBackendVersion: "2.5.2" });
+      });
+      assert.equal(callCount, 1, "Mutasi tidak boleh di-retry gateway");
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("Set-Cookie"), null, "Storage error tidak menghapus session cookie");
+      const body = await response.json();
+      assert.deepEqual(body, {
+        ok: false,
+        data: null,
+        error: { code: code.toLowerCase(), message: errorMsg },
+        gasBackendVersion: "2.5.2",
+      });
+    }
+  });
+}
+
+test("mutasi tidak di-retry walau upstream HTTP 503 (outcome mungkin sudah commit)", async () => {
+  for (const makeRequest of MUTATION_REQUESTS) {
+    let callCount = 0;
+    const response = await handleRequest({ request: makeRequest(), env }, async () => {
+      callCount++;
+      return gasResponse({ status: "error", errorCode: "DATA_SERVICE_UNAVAILABLE", errorMsg: "x" }, 503);
+    });
+    assert.equal(callCount, 1);
+    assert.equal(response.status, 503);
+  }
+});
+
 test("POST /api/letters mutation tidak di-retry meski requestId ada (idempotency di GAS bukan di gateway)", async () => {
   // requestId-based idempotency is handled server-side in GAS, not in the gateway.
   // The gateway must NOT retry mutations even with requestId.

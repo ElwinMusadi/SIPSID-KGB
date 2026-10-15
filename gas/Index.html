@@ -1414,9 +1414,48 @@
 
       const SESSION_ERROR_CODES = new Set(['AUTH_REQUIRED', 'SESSION_EXPIRED', 'INVALID_SESSION', 'HTTP_401']);
 
+      function sanitizeCorrelationRef(value) {
+          const ref = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+          return /^[\w.:-]{1,64}$/.test(ref) ? ref : '';
+      }
+
+      function sanitizeBackendVersion(value) {
+          const version = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+          return /^[\w.-]{1,32}$/.test(version) ? version : '';
+      }
+
+      function sanitizeErrorCode(value) {
+          const code = typeof value === 'string' ? value.trim().toUpperCase() : '';
+          return /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
+      }
+
+      // Backend GAS menyematkan "(Kode: <CODE>)" atau "(Kode: <CODE>; Ref: <REF>)" di akhir pesan error karena
+      // google.script.run hanya meneruskan message, bukan error.code. Parser ini memulihkan kode (dan ref bila ada)
+      // untuk kegagalan message-only tanpa membawa token/payload.
+      const EMBEDDED_ERROR_MARKER = /\s*\(Kode:\s*([A-Za-z0-9_]+)(?:;\s*Ref:\s*([A-Za-z0-9._:-]+))?\)\s*$/;
+
+      function parseEmbeddedErrorMarker(message) {
+          const text = typeof message === 'string' ? message.trim() : '';
+          const match = text.match(EMBEDDED_ERROR_MARKER);
+          if (!match) return { message: text, code: '', ref: '' };
+          return {
+              message: text.slice(0, match.index).trim(),
+              code: sanitizeErrorCode(match[1]),
+              ref: sanitizeCorrelationRef(match[2])
+          };
+      }
+
+      // Kode error dari envelope (code/errorCode/error.code), status 'not_found' lama, atau marker tersemat di message.
+      function normalizeApiErrorCode(value) {
+          const explicit = sanitizeErrorCode(String(value?.code || value?.errorCode || value?.error?.code || ''));
+          if (explicit) return explicit;
+          if (typeof value?.status === 'string' && value.status.trim().toLowerCase() === 'not_found') return 'NOT_FOUND';
+          return parseEmbeddedErrorMarker(value?.message || value?.errorMsg || value?.error?.message).code;
+      }
+
       function getApiErrorCode(value, httpStatus = 0) {
           if (httpStatus === 401) return 'HTTP_401';
-          return String(value?.code || value?.error?.code || value?.errorCode || '').trim().toUpperCase();
+          return normalizeApiErrorCode(value);
       }
 
       function isSessionError(value, httpStatus = 0) {
@@ -1462,28 +1501,124 @@
           }
           const result = await response.json().catch(() => null);
           if (!response.ok || !result || result.ok === false || result.status === 'error') {
-              const error = new Error(result?.error?.message || result?.errorMsg || 'Layanan tidak dapat memproses permintaan.');
-              error.code = result?.error?.code || result?.errorCode || `HTTP_${response.status}`;
+              // Hanya metadata aman yang disalin ke error: kode, status HTTP, versi backend, dan ref korelasi.
+              // Token sesi dan payload permintaan tidak pernah dicatat atau dilampirkan.
+              const error = createApiError(result, 'Layanan tidak dapat memproses permintaan.', `HTTP_${response.status}`);
+              error.httpStatus = response.status;
+              const gatewayRef = sanitizeCorrelationRef(response.headers?.get?.('cf-ray'));
+              if (gatewayRef) error.gatewayRef = gatewayRef;
               if (!skipSessionExpiry) handleSessionError(error, response.status);
               throw error;
           }
           return result.ok === true ? result.data : result;
       }
 
+      // Ref GAS (dari envelope atau marker) dan ref gateway (header cf-ray) dibedakan agar operator tahu log mana yang dicari.
+      function getApiErrorRef(value) {
+          return sanitizeCorrelationRef(value?.ref) || parseEmbeddedErrorMarker(value?.message).ref;
+      }
+
+      function getGatewayErrorRef(value) {
+          return sanitizeCorrelationRef(value?.gatewayRef);
+      }
+
+      // Membangun Error dari envelope respons backend (GAS `{status:'error'|'not_found', errorCode?, errorMsg, gasBackendVersion}`
+      // atau Pages `{ok:false, error:{code, message}, gasBackendVersion}`) tanpa membawa token/payload.
+      function createApiError(result, fallbackMessage, fallbackCode = '') {
+          const error = new Error(result?.error?.message || result?.errorMsg || fallbackMessage);
+          error.code = normalizeApiErrorCode(result) || fallbackCode;
+          const backendVersion = sanitizeBackendVersion(result?.gasBackendVersion ?? result?.backendVersion);
+          if (backendVersion) error.backendVersion = backendVersion;
+          const ref = sanitizeCorrelationRef(
+              result?.error?.ref ?? result?.error?.correlationId ?? result?.ref ?? result?.correlationId
+          ) || parseEmbeddedErrorMarker(error.message).ref;
+          if (ref) error.ref = ref;
+          return error;
+      }
+
+      // Kegagalan yang tidak memastikan apakah baris sudah tertulis: pengguna harus mengulang dengan data sama
+      // (requestId tertunda dipakai ulang) atau memeriksa Arsip. Tidak ada retry otomatis.
+      const UNVERIFIED_SAVE_CODES = new Set([
+          'INTERNAL_ERROR', 'DATA_WRITE_FAILED', 'DATA_SERVICE_UNAVAILABLE', 'UPSTREAM_UNAVAILABLE',
+          'UPSTREAM_INVALID_RESPONSE', 'REQUEST_FAILED', 'SERVER_MISCONFIGURED'
+      ]);
+      // Backend menjamin tidak ada baris tertulis: cukup ulangi setelah proses lain selesai.
+      const BUSY_SAVE_CODES = new Set(['BUSY', 'LOCK_TIMEOUT', 'LOCK_BUSY', 'TOO_MANY_REQUESTS', 'HTTP_429', 'HTTP_423']);
+      // Kode yang pesannya sudah disaring backend (publicErrorMessage_ / Pages) sehingga aman ditampilkan apa adanya.
+      const SAFE_BACKEND_MESSAGE_CODES = new Set([
+          'DATA_WRITE_DENIED', 'WRITE_DENIED', 'PERMISSION_DENIED', 'PROTECTED_RANGE', 'FORBIDDEN',
+          'DATA_VALIDATION_ERROR', 'VALIDATION_ERROR', 'BAD_REQUEST', 'INVALID_JSON', 'UNSUPPORTED_MEDIA_TYPE',
+          'PAYLOAD_TOO_LARGE', 'ORIGIN_FORBIDDEN', 'NOT_FOUND', 'CONFIG_ERROR', 'SCHEMA_ERROR', 'DATA_ERROR',
+          'DUPLICATE_USER', 'LAST_ADMIN_PROTECTED', 'TOO_MANY_ATTEMPTS', 'AUTH_REQUIRED', 'SESSION_EXPIRED',
+          'INVALID_SESSION', 'HTTP_401', 'UNAUTHORIZED_GATEWAY', 'LOCAL_STATE_MISMATCH'
+      ]);
+      const SAFE_CODE_FALLBACK_MESSAGES = {
+          DATA_WRITE_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet (proteksi sheet/range atau hak akses). Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          WRITE_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet (proteksi sheet/range atau hak akses). Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          PERMISSION_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          PROTECTED_RANGE: 'Sheet atau range tujuan terproteksi. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          FORBIDDEN: 'Akun Anda tidak memiliki hak untuk tindakan ini.',
+          DATA_VALIDATION_ERROR: 'Data ditolak oleh aturan validasi Spreadsheet. Periksa kembali isian lalu simpan ulang.',
+          VALIDATION_ERROR: 'Data formulir tidak valid. Periksa kembali isian lalu simpan ulang.',
+          NOT_FOUND: 'Data yang dituju tidak ditemukan di server.'
+      };
+
+      function describeSubmitErrorDiagnostics(error) {
+          const parts = [];
+          const code = normalizeApiErrorCode(error);
+          if (code) parts.push(`kode ${code}`);
+          if (Number.isInteger(error?.httpStatus) && error.httpStatus > 0) parts.push(`HTTP ${error.httpStatus}`);
+          const backendVersion = sanitizeBackendVersion(error?.backendVersion);
+          if (backendVersion) parts.push(`backend v${backendVersion}`);
+          const ref = getApiErrorRef(error);
+          if (ref) parts.push(`ref ${ref}`);
+          const gatewayRef = getGatewayErrorRef(error);
+          if (gatewayRef) parts.push(`gateway ${gatewayRef}`);
+          return parts.length ? ` [${parts.join(', ')}]` : '';
+      }
+
       function getSubmitErrorMessage(error, isEditing) {
           const fallback = `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`;
-          const message = typeof error?.message === 'string' ? error.message.trim() : '';
-          if (!isEditing) return message || fallback;
+          const rawMessage = typeof error?.message === 'string' ? error.message.trim() : '';
+          const message = parseEmbeddedErrorMarker(rawMessage).message;
+          const code = normalizeApiErrorCode(error);
+          const diagnostics = describeSubmitErrorDiagnostics(error);
 
-          const code = String(error?.code || '').toUpperCase();
           const isApiVersionMismatch = code === 'ACTION_NOT_FOUND' ||
-              /Aksi API tidak dikenal|Script function not found:\s*apiUpdateLetter/i.test(message);
-          if (isApiVersionMismatch) {
+              /Aksi API tidak dikenal|Script function not found:\s*apiUpdateLetter/i.test(rawMessage);
+          if (isEditing && isApiVersionMismatch) {
               const detail = message ? ` Detail layanan: ${message}` : '';
               return `Versi backend yang aktif belum mendukung pembaruan arsip. Deployment frontend dan backend belum sinkron.${detail}`;
           }
 
-          return message || fallback;
+          if (BUSY_SAVE_CODES.has(code)) {
+              return `Proses lain sedang berlangsung di server sehingga penyimpanan ditunda dan belum ada data yang ditulis. Jangan ubah formulir; tunggu beberapa saat lalu ulangi dengan data yang sama.${diagnostics}`;
+          }
+
+          if (code === 'NETWORK_ERROR') {
+              const guidance = isEditing
+                  ? 'Pembaruan belum dapat dipastikan: jangan ubah formulir, periksa menu Arsip setelah koneksi pulih, lalu ulangi hanya bila perubahan belum tersimpan.'
+                  : 'Penyimpanan belum dapat dipastikan: jangan ubah formulir, ulangi dengan data yang sama setelah koneksi pulih, atau periksa menu Arsip.';
+              return `${message || 'Tidak dapat terhubung ke layanan.'} ${guidance}`;
+          }
+
+          if (SAFE_BACKEND_MESSAGE_CODES.has(code)) {
+              return `${message || SAFE_CODE_FALLBACK_MESSAGES[code] || fallback}${diagnostics}`;
+          }
+
+          // INTERNAL_ERROR, DATA_WRITE_FAILED, HTTP 5xx, kegagalan upstream, atau error tanpa kode (mis. failure handler
+          // google.script.run). Pesan mentah tidak ditampilkan karena bisa berisi detail internal.
+          const unverified = UNVERIFIED_SAVE_CODES.has(code) || /^HTTP_5\d\d$/.test(code) || !code;
+          if (unverified) {
+              // Create: requestId tertunda dipertahankan sehingga pengiriman ulang data sama dikenali backend (tidak duplikat).
+              // Update: tidak idempoten; pengguna harus memeriksa Arsip dahulu sebelum mengulang agar tidak menimpa perubahan lain.
+              const guidance = isEditing
+                  ? 'Pembaruan belum dapat dipastikan karena layanan mengalami kendala internal. Jangan ubah formulir; buka menu Arsip untuk memastikan apakah perubahan sudah tersimpan, lalu ulangi pembaruan hanya bila belum tersimpan.'
+                  : 'Penyimpanan belum dapat dipastikan karena layanan mengalami kendala internal. Jangan ubah formulir; ulangi penyimpanan dengan data yang sama (permintaan akan dikenali sebagai pengiriman ulang dan tidak digandakan) atau periksa menu Arsip terlebih dahulu.';
+              return `${guidance}${diagnostics}`;
+          }
+
+          return `${fallback}${diagnostics}`;
       }
 
       const api = {
@@ -1568,6 +1703,7 @@
       let activeLetterData = null;
       let activeReportContext = null;
       let editingLetterId = null;
+      let letterSubmitPromise = null;
       let usersDatabase = [];
       let usersLoaded = false;
       let usersLoading = false;
@@ -2050,9 +2186,14 @@
       function submitKgbForm(e) {
           if (e) e.preventDefault();
 
+          // Guard pengiriman ganda: tombol dinonaktifkan DAN promise in-flight dipegang, karena submit via Enter
+          // atau requestSubmit() tidak terhalang oleh tombol yang disabled. Tidak ada retry otomatis.
+          if (letterSubmitPromise) return letterSubmitPromise;
+
           const submitBtn = document.getElementById('btn-submit-form');
           const originalBtnHtml = submitBtn.innerHTML;
 
+          // Target edit dan mode ditangkap di awal submit; perubahan editingLetterId selama request tidak berpengaruh.
           const letterIdBeingEdited = editingLetterId;
           const isEditing = Boolean(letterIdBeingEdited);
           submitBtn.innerHTML = `<i class="fas fa-spinner fa-spin text-lg"></i><span>${isEditing ? 'Memperbarui' : 'Menyimpan'} ke Database...</span>`;
@@ -2090,25 +2231,29 @@
           const pendingCreate = isEditing ? null : getOrCreatePendingLetterRequest(formData);
           if (pendingCreate) formData.requestId = pendingCreate.requestId;
 
-          const request = isEditing
-              ? api.updateLetter(letterIdBeingEdited, formData)
-              : api.createLetter(formData);
-
-          request
+          letterSubmitPromise = Promise.resolve()
+              .then(() => (isEditing
+                  ? api.updateLetter(letterIdBeingEdited, formData)
+                  : api.createLetter(formData)))
               .then(result => {
                   if (!result || result.status !== 'success') {
-                      throw new Error(result?.errorMsg || `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`);
+                      throw createApiError(result, `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`);
                   }
                   const savedData = { ...formData, ...(result.data || {}), id: isEditing ? letterIdBeingEdited : result.data?.id };
                   if (isEditing) {
                       const existingIndex = lettersDatabase.findIndex(item => String(item.id) === String(letterIdBeingEdited));
-                      if (existingIndex === -1) throw new Error('Arsip yang diperbarui tidak ditemukan pada daftar lokal. Muat ulang arsip.');
+                      if (existingIndex === -1) {
+                          const mismatch = new Error('Arsip yang diperbarui tidak ditemukan pada daftar lokal. Muat ulang arsip.');
+                          mismatch.code = 'LOCAL_STATE_MISMATCH';
+                          throw mismatch;
+                      }
                       lettersDatabase[existingIndex] = savedData;
                       setEditingMode(null);
                       showToast('Berhasil Diperbarui!', 'Perubahan data KGB telah disimpan ke Spreadsheet.', true);
-                   } else {
-                       clearPendingLetterRequest(pendingCreate?.requestId);
-                       lettersDatabase = lettersDatabase.filter(item => item.id !== savedData.id);
+                  } else {
+                      // requestId tertunda hanya dibersihkan setelah backend mengonfirmasi sukses.
+                      clearPendingLetterRequest(pendingCreate?.requestId);
+                      lettersDatabase = lettersDatabase.filter(item => item.id !== savedData.id);
                       lettersDatabase.unshift(savedData);
                       showToast('Berhasil Disimpan!', 'Data KGB telah masuk ke Spreadsheet.', true);
                   }
@@ -2121,6 +2266,8 @@
                   restoreBtnAndPreview(submitBtn, restoredButtonHtml, savedData);
               })
               .catch(error => {
+                  // Gagal: form, mode edit, dan requestId tertunda dipertahankan agar pengguna dapat mengulang
+                  // dengan data sama tanpa risiko duplikasi. Tidak ada retry otomatis.
                   showToast(
                       isEditing ? 'Pembaruan Gagal' : 'Penyimpanan Gagal',
                       getSubmitErrorMessage(error, isEditing),
@@ -2129,7 +2276,12 @@
                   submitBtn.innerHTML = originalBtnHtml;
                   submitBtn.disabled = false;
                   submitBtn.classList.remove('opacity-75', 'cursor-not-allowed');
+              })
+              .finally(() => {
+                  letterSubmitPromise = null;
               });
+
+          return letterSubmitPromise;
       }
 
       function restoreBtnAndPreview(btn, originalHtml, data) {

@@ -273,11 +273,17 @@ function upstreamStatus(normalized, responseStatus) {
   const normalizedCode = String(code || "").toLowerCase();
   if (normalizedCode === "unauthorized" || normalizedCode === "auth_required" || normalizedCode === "invalid_session" || normalizedCode === "session_expired") return 401;
   if (normalizedCode === "forbidden" || normalizedCode === "unauthorized_gateway") return 403;
+  // Spreadsheet permission/protection rejected the write (GAS v2.5.2+).
+  if (normalizedCode === "data_write_denied" || normalizedCode === "write_forbidden") return 403;
   if (normalizedCode === "not_found") return 404;
   if (normalizedCode === "duplicate_user") return 409;
   if (normalizedCode === "validation_error" || normalizedCode === "invalid_credentials" || normalizedCode === "bad_request") return 400;
-  if (normalizedCode === "last_admin_protected") return 422;
+  if (normalizedCode === "last_admin_protected" || normalizedCode === "data_validation_error") return 422;
   if (normalizedCode === "too_many_attempts") return 429;
+  // Lock contention or transient Spreadsheet outage. Mutations are still never
+  // retried by the gateway (see RETRYABLE_ACTIONS): the outcome may be committed.
+  if (normalizedCode === "busy" || normalizedCode === "data_service_unavailable") return 503;
+  // data_write_failed and any unclassified upstream failure.
   return 502;
 }
 

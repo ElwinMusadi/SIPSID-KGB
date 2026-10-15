@@ -9,7 +9,7 @@
  * Version: New version > Deploy. Tanpa langkah ini, endpoint produksi masih
  * melayani versi lama dan akan mengembalikan ACTION_NOT_FOUND untuk aksi baru.
  */
-var GAS_BACKEND_VERSION = "2.5.1";
+var GAS_BACKEND_VERSION = "2.5.3";
 
 var CONFIG_KEYS_ = {
   SPREADSHEET_ID: "SPREADSHEET_ID",
@@ -25,6 +25,19 @@ var SHEET_NAMES_ = {
   SALARIES: "Master_Gaji_Pangkat",
   LETTERS: "Database_Surat"
 };
+
+// Bounded wait for the letter mutation ScriptLock. Must stay well below the
+// Cloudflare gateway upstream timeout (28 s) so lock contention surfaces as a
+// controlled BUSY error instead of a gateway timeout or a raw GAS exception.
+var LETTER_LOCK_TIMEOUT_MS_ = 10000;
+
+// Error codes whose messages are safe to return to clients verbatim.
+var PUBLIC_ERROR_CODES_ = [
+  "BAD_REQUEST", "PAYLOAD_TOO_LARGE", "ACTION_NOT_FOUND", "VALIDATION_ERROR", "AUTH_REQUIRED",
+  "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR",
+  "DUPLICATE_USER", "NOT_FOUND", "LAST_ADMIN_PROTECTED", "TOO_MANY_ATTEMPTS",
+  "BUSY", "DATA_WRITE_DENIED", "DATA_VALIDATION_ERROR", "DATA_SERVICE_UNAVAILABLE", "DATA_WRITE_FAILED"
+];
 
 var LETTER_FIELDS_ = [
   "id", "statusPegawai", "nama", "nip", "pangkat", "jabatan", "unit", "kabkot",
@@ -109,21 +122,71 @@ function apiListLetters(sessionToken) {
 }
 
 function apiCreateLetter(sessionToken, payload) {
-  var session = requireCurrentSession_(sessionToken, false);
-  // Extract requestId before passing payload to validateAndNormalizeLetter_ so
-  // the client cannot use it to choose an arbitrary letter ID via the body.
-  var rawRequestId = payload ? payload.requestId : undefined;
-  return createLetter_(payload || {}, session, rawRequestId);
+  return runLetterApi_("create", "", function(context) {
+    var session = resolveLetterSession_(context, sessionToken);
+    // Extract requestId before passing payload to validateAndNormalizeLetter_ so
+    // the client cannot use it to choose an arbitrary letter ID via the body.
+    var rawRequestId = payload ? payload.requestId : undefined;
+    return createLetter_(payload || {}, session, rawRequestId);
+  });
 }
 
 function apiDeleteLetter(sessionToken, id) {
-  var session = requireCurrentSession_(sessionToken, false);
-  return deleteLetter_(id, session);
+  return runLetterApi_("delete", id, function(context) {
+    var session = resolveLetterSession_(context, sessionToken);
+    return deleteLetter_(id, session);
+  });
 }
 
 function apiUpdateLetter(sessionToken, id, payload) {
-  var session = requireCurrentSession_(sessionToken, false);
-  return updateLetter_(id, payload || {}, session);
+  return runLetterApi_("update", id, function(context) {
+    var session = resolveLetterSession_(context, sessionToken);
+    return updateLetter_(id, payload || {}, session);
+  });
+}
+
+/**
+ * Resolves the live session for a letter mutation inside the diagnostic
+ * "session" stage. Raw Spreadsheet/Properties failures while reading
+ * Master_User become safe coded errors with a Ref (no data was written yet);
+ * coded auth/config errors pass through unchanged. The actor is recorded in the
+ * diagnostic context only after the session has been verified.
+ */
+function resolveLetterSession_(context, sessionToken) {
+  var session = runLetterStage_(context, "session", function() {
+    return requireCurrentSession_(sessionToken, false);
+  });
+  context.actor = session.username;
+  return session;
+}
+
+/**
+ * Boundary for letter mutation entry points (direct google.script.run and
+ * doPost via dispatchHttpAction_). google.script.run transports only the
+ * message of a thrown error, so public coded errors get a "(Kode: CODE)" marker
+ * appended here when they do not already carry one. Domain functions keep their
+ * original messages. Any raw exception that escaped every stage is converted to
+ * a safe coded error with a Ref (stage "internal", outcome reported uncertain).
+ */
+function runLetterApi_(operation, rawId, fn) {
+  var context = { operation: operation, actor: "", id: validateLetterId_(rawId) || "" };
+  try {
+    return fn(context);
+  } catch (error) {
+    var coded = error;
+    if (!isPublicAppError_(error)) {
+      try {
+        runLetterStage_(context, "internal", function() { throw error; });
+      } catch (converted) {
+        coded = converted;
+      }
+    }
+    if (ERROR_MARKER_PATTERN_.test(coded.message)) throw coded;
+    var marked = appError_(coded.code, coded.message + " (Kode: " + coded.code + ")");
+    if (coded.ref) marked.ref = coded.ref;
+    if (coded.stage) marked.stage = coded.stage;
+    throw marked;
+  }
 }
 
 // ─── User Management Public Wrappers (GAS direct UI) ───────────────────────
@@ -393,20 +456,25 @@ function createLetter_(payload, session, rawRequestId) {
   }
 
   var letter = validateAndNormalizeLetter_(payload);
-  var lock = LockService.getScriptLock();
+  var context = { operation: "create", actor: session.username, id: "", idempotent: !!requestId };
+  var lock = acquireLetterLock_(context);
   try {
-    lock.waitLock(30000);
-    // TOCTOU: re-validate actor inside the letter lock before any mutation.
-    revalidateActorInLock_(session);
-
-    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
-    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
-    validateLetterSheet_(sheet);
+    var sheet = runLetterStage_(context, "read", function() {
+      // TOCTOU: re-validate actor inside the letter lock before any mutation.
+      revalidateActorInLock_(session);
+      var letterSheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
+      if (!letterSheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
+      validateLetterSheet_(letterSheet);
+      return letterSheet;
+    });
 
     if (requestId) {
       // Idempotency path: derive deterministic ID from requestId.
       var derivedId = deriveLetterIdFromRequestId_(requestId);
-      var found = findLetterRowByIdInSheet_(sheet, derivedId);
+      context.id = derivedId;
+      var found = runLetterStage_(context, "read", function() {
+        return findLetterRowByIdInSheet_(sheet, derivedId);
+      });
       if (found.rowIndex !== -1) {
         // Row already exists — return existing data without appending.
         var existing = rowToLetter_(found.rowData);
@@ -417,20 +485,24 @@ function createLetter_(payload, session, rawRequestId) {
       letter.id = derivedId;
     } else {
       // Legacy path: generate a unique random ID.
-      letter.id = createUniqueLetterId_(sheet);
+      letter.id = runLetterStage_(context, "read", function() {
+        return createUniqueLetterId_(sheet);
+      });
+      context.id = letter.id;
     }
 
     var row = [new Date()];
     for (var i = 0; i < LETTER_FIELDS_.length; i++) {
       row.push(safeSheetValue_(letter[LETTER_FIELDS_[i]]));
     }
-    sheet.appendRow(row);
-    SpreadsheetApp.flush();
+    // Single attempt only: a failed append/flush may still have committed.
+    runLetterStage_(context, "write", function() { sheet.appendRow(row); });
+    runLetterStage_(context, "flush", function() { SpreadsheetApp.flush(); });
 
     console.info("Letter created", JSON.stringify({ id: letter.id, actor: session.username }));
     return { status: "success", data: letter };
   } finally {
-    if (lock.hasLock()) lock.releaseLock();
+    releaseLetterLock_(lock);
   }
 }
 
@@ -438,32 +510,40 @@ function deleteLetter_(id, session) {
   var recordId = validateLetterId_(id);
   if (!recordId) throw appError_("VALIDATION_ERROR", "ID surat tidak valid.");
 
-  var lock = LockService.getScriptLock();
+  var context = { operation: "delete", actor: session.username, id: recordId };
+  var lock = acquireLetterLock_(context);
   try {
-    lock.waitLock(30000);
     // TOCTOU: re-validate actor inside the lock. Also get live role for delete authorization.
-    var liveRole = revalidateActorInLock_(session);
+    var liveRole = runLetterStage_(context, "read", function() {
+      return revalidateActorInLock_(session);
+    });
     if (liveRole !== "admin") {
       throw appError_("FORBIDDEN", "Hanya administrator yang dapat menghapus arsip.");
     }
 
-    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
-    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return { status: "not_found", errorMsg: "Data surat tidak ditemukan." };
+    var lookup = runLetterStage_(context, "read", function() {
+      var letterSheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
+      if (!letterSheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
+      var lastRow = letterSheet.getLastRow();
+      if (lastRow < 2) return { sheet: letterSheet, ids: null };
+      return { sheet: letterSheet, ids: letterSheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues() };
+    });
+    if (!lookup.ids) return { status: "not_found", errorCode: "NOT_FOUND", errorMsg: "Data surat tidak ditemukan." };
 
-    var ids = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+    var ids = lookup.ids;
     for (var i = ids.length - 1; i >= 0; i--) {
       if (String(ids[i][0] || "").trim() === recordId) {
-        sheet.deleteRow(i + 2);
-        SpreadsheetApp.flush();
+        var sheetRow = i + 2;
+        // Single attempt only: a failed delete/flush may still have committed.
+        runLetterStage_(context, "write", function() { lookup.sheet.deleteRow(sheetRow); });
+        runLetterStage_(context, "flush", function() { SpreadsheetApp.flush(); });
         console.info("Letter deleted", JSON.stringify({ id: recordId, actor: session.username }));
         return { status: "success", id: recordId };
       }
     }
-    return { status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
+    return { status: "not_found", errorCode: "NOT_FOUND", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
   } finally {
-    if (lock.hasLock()) lock.releaseLock();
+    releaseLetterLock_(lock);
   }
 }
 
@@ -482,20 +562,22 @@ function updateLetter_(id, payload, session) {
   // Ensure id field in normalized result is always the URL id, not payload id.
   letter.id = recordId;
 
-  var lock = LockService.getScriptLock();
+  var context = { operation: "update", actor: session.username, id: recordId };
+  var lock = acquireLetterLock_(context);
   try {
-    lock.waitLock(30000);
-    // TOCTOU: re-validate actor inside the letter lock before any mutation.
-    revalidateActorInLock_(session);
+    var lookup = runLetterStage_(context, "read", function() {
+      // TOCTOU: re-validate actor inside the letter lock before any mutation.
+      revalidateActorInLock_(session);
+      var letterSheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
+      if (!letterSheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
+      validateLetterSheet_(letterSheet);
+      var lastRow = letterSheet.getLastRow();
+      if (lastRow < 2) return { sheet: letterSheet, ids: null };
+      return { sheet: letterSheet, ids: letterSheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues() };
+    });
+    if (!lookup.ids) return { status: "not_found", errorCode: "NOT_FOUND", errorMsg: "Data surat tidak ditemukan." };
 
-    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.LETTERS);
-    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Database_Surat tidak ditemukan.");
-    validateLetterSheet_(sheet);
-
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return { status: "not_found", errorMsg: "Data surat tidak ditemukan." };
-
-    var ids = sheet.getRange(2, 2, lastRow - 1, 1).getDisplayValues();
+    var ids = lookup.ids;
     for (var i = 0; i < ids.length; i++) {
       if (String(ids[i][0] || "").trim() !== recordId) continue;
 
@@ -507,15 +589,18 @@ function updateLetter_(id, payload, session) {
         mutablValues.push(safeSheetValue_(letter[LETTER_FIELDS_[j]]));
       }
       // Write from col C (column 3) to cover all mutable fields.
-      sheet.getRange(sheetRow, 3, 1, mutablValues.length).setValues([mutablValues]);
-      SpreadsheetApp.flush();
+      // Single attempt only: a failed setValues/flush may still have committed.
+      runLetterStage_(context, "write", function() {
+        lookup.sheet.getRange(sheetRow, 3, 1, mutablValues.length).setValues([mutablValues]);
+      });
+      runLetterStage_(context, "flush", function() { SpreadsheetApp.flush(); });
 
       console.info("Letter updated", JSON.stringify({ id: recordId, actor: session.username }));
       return { status: "success", data: letter };
     }
-    return { status: "not_found", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
+    return { status: "not_found", errorCode: "NOT_FOUND", errorMsg: "Data surat tidak ditemukan atau sudah dihapus." };
   } finally {
-    if (lock.hasLock()) lock.releaseLock();
+    releaseLetterLock_(lock);
   }
 }
 
@@ -1198,14 +1283,216 @@ function appError_(code, message) {
   return error;
 }
 
+function isPublicAppError_(error) {
+  return !!(error && typeof error.code === "string" && PUBLIC_ERROR_CODES_.indexOf(error.code) !== -1);
+}
+
 function publicErrorMessage_(error) {
-  var allowed = [
-    "BAD_REQUEST", "PAYLOAD_TOO_LARGE", "ACTION_NOT_FOUND", "VALIDATION_ERROR", "AUTH_REQUIRED",
-    "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR",
-    "DUPLICATE_USER", "NOT_FOUND", "LAST_ADMIN_PROTECTED", "TOO_MANY_ATTEMPTS"
-  ];
-  if (error && allowed.indexOf(error.code) !== -1) return error.message;
+  if (isPublicAppError_(error)) return error.message;
   return "Layanan sedang mengalami kendala. Silakan coba kembali.";
+}
+
+// ─── Letter mutation lock + staged storage diagnostics ─────────────────────
+//
+// Raw Apps Script exceptions (lock timeout, protected range, data-validation
+// rejection, Spreadsheet service outage) previously surfaced to clients only as
+// the generic publicErrorMessage_ text with no way to correlate server logs.
+// These helpers convert failures around the lock and the write/flush calls into
+// coded, operator-directed errors carrying a short reference ID. Server logs
+// carry ref, actor, record id, operation, stage, code, technical reason, error
+// name, and sanitized stack frames only — never error.message, the raw stack,
+// the payload, passwords, or session tokens.
+//
+// Mutations are NEVER retried here: after appendRow/setValues/deleteRow/flush
+// throws, the change may already be committed. Clients recover via requestId
+// idempotency (create) or by reloading the archive.
+
+function createErrorRef_() {
+  try {
+    return String(Utilities.getUuid()).replace(/-/g, "").substring(0, 8).toUpperCase();
+  } catch (e) {
+    return Date.now().toString(36).toUpperCase();
+  }
+}
+
+// Spreadsheet exception messages can embed rejected cell values (e.g. a data
+// validation failure quoting the NIP or name that was written). Diagnostic logs
+// therefore NEVER contain error.message or the raw stack text; only allowlisted
+// technical fields and sanitized stack frames are emitted.
+
+var LOG_ERROR_NAMES_ = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "InternalError", "Exception"];
+var LOG_OPERATIONS_ = ["create", "update", "delete"];
+var LOG_STAGES_ = ["session", "lock", "read", "write", "flush", "internal"];
+var LOG_REASONS_ = {
+  BUSY: "lock_unavailable",
+  DATA_WRITE_DENIED: "permission_or_protection",
+  DATA_VALIDATION_ERROR: "sheet_data_validation_rule",
+  DATA_SERVICE_UNAVAILABLE: "transient_spreadsheet_service",
+  DATA_WRITE_FAILED: "unclassified"
+};
+var LOG_MAX_STACK_FRAMES_ = 10;
+
+function allowlistedLogValue_(value, allowed, fallback) {
+  var text = String(value == null ? "" : value);
+  return allowed.indexOf(text) !== -1 ? text : fallback;
+}
+
+/**
+ * Returns sanitized "fn@location:line:col" frames from an exception stack.
+ * - The exception header (name + message, possibly multi-line) is stripped.
+ * - Any line whose text also appears inside the message is dropped, so an
+ *   embedded newline cannot smuggle message content in as a fake frame.
+ * - Only frames matching a strict "at [fn] (location:line[:col])" shape are
+ *   kept; location is reduced to its basename; quoted text, spaces, long
+ *   digit runs, and anything else outside the identifier charset is rejected.
+ */
+function safeStackFrames_(error) {
+  var frames = [];
+  if (!error || typeof error.stack !== "string") return frames;
+  var stack = error.stack;
+  var message = typeof error.message === "string" ? error.message : "";
+  var header = "";
+  try { header = String(error); } catch (_) {}
+  if (header && stack.indexOf(header) === 0) stack = stack.substring(header.length);
+
+  var lines = stack.split(/\r\n|\r|\n|\u2028|\u2029/);
+  for (var i = 0; i < lines.length && frames.length < LOG_MAX_STACK_FRAMES_; i++) {
+    var line = lines[i].trim();
+    if (!line || line.length > 300) continue;
+    if (message && message.indexOf(line) !== -1) continue;
+    // "at fn (path:line[:col])" or "at path:line[:col]" (anonymous).
+    var match = line.match(/^at ([A-Za-z_$][\w$.<>]{0,80}) \(([^()"'`]{1,240}?):(\d{1,6})(?::(\d{1,6}))?\)$/) ||
+      line.match(/^at ()([^\s()"'`]{1,240}?):(\d{1,6})(?::(\d{1,6}))?$/);
+    if (!match) continue;
+    var fn = match[1] || "";
+    // Directory components are dropped; only a strict basename survives.
+    var location = match[2].split(/[\\\/]/).pop();
+    if (!/^[A-Za-z0-9_.<>\-]{1,80}$/.test(location)) continue;
+    if (/\d{6,}/.test(fn) || /\d{6,}/.test(location)) continue;
+    frames.push((fn ? fn + "@" : "") + location + ":" + match[3] + (match[4] ? ":" + match[4] : ""));
+  }
+  return frames;
+}
+
+function logLetterFailure_(context, stage, code, error) {
+  var ref = createErrorRef_();
+  try {
+    console.error("Letter operation failure", JSON.stringify({
+      ref: ref,
+      operation: allowlistedLogValue_(context.operation, LOG_OPERATIONS_, "unknown"),
+      stage: allowlistedLogValue_(stage, LOG_STAGES_, "unknown"),
+      actor: context.actor || "",
+      id: context.id || "",
+      code: code,
+      reason: LOG_REASONS_[code] || "unclassified",
+      errorName: allowlistedLogValue_(error && error.name, LOG_ERROR_NAMES_, error ? "Other" : "None"),
+      messageLength: error && typeof error.message === "string" ? error.message.length : 0,
+      frames: safeStackFrames_(error)
+    }));
+  } catch (_) {}
+  return ref;
+}
+
+/**
+ * Acquires the script lock for a letter mutation with a bounded wait.
+ * Throws BUSY (no data touched) when the lock cannot be obtained.
+ * Callers must release with releaseLetterLock_ in a finally block.
+ */
+function acquireLetterLock_(context) {
+  var lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    lock.waitLock(LETTER_LOCK_TIMEOUT_MS_);
+    return lock;
+  } catch (error) {
+    releaseLetterLock_(lock);
+    var ref = logLetterFailure_(context, "lock", "BUSY", error);
+    var busy = appError_("BUSY", "Sistem sedang memproses permintaan lain sehingga data belum diubah. Silakan coba kembali dalam beberapa saat. " + errorRefSuffix_("BUSY", ref));
+    busy.ref = ref;
+    busy.stage = "lock";
+    throw busy;
+  }
+}
+
+function releaseLetterLock_(lock) {
+  try {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  } catch (error) {
+    // Fixed code only: never log the raw exception.
+    console.warn("Letter lock release failed", JSON.stringify({ code: "LOCK_RELEASE_FAILED" }));
+  }
+}
+
+/**
+ * Classifies a raw Spreadsheet/Apps Script exception by message heuristics
+ * (English and Indonesian locales). Unrecognized failures stay DATA_WRITE_FAILED.
+ */
+function classifySpreadsheetError_(error) {
+  var text = String(error && error.message ? error.message : error || "").toLowerCase();
+  if (/protected|dilindungi|permission|izin|access denied|not have access|tidak memiliki akses/.test(text)) {
+    return "DATA_WRITE_DENIED";
+  }
+  if (/data validation|validation rule|aturan validasi|validasi data/.test(text)) {
+    return "DATA_VALIDATION_ERROR";
+  }
+  if (/timed out|timeout|waktu habis|temporar|sementara|try again|coba lagi|unavailable|tidak tersedia|too many|terlalu banyak|rate limit|quota|kuota|service spreadsheets|layanan spreadsheet|service error|internal error|server error|backend error/.test(text)) {
+    return "DATA_SERVICE_UNAVAILABLE";
+  }
+  return "DATA_WRITE_FAILED";
+}
+
+var LETTER_STORAGE_REASONS_ = {
+  DATA_WRITE_DENIED: "Spreadsheet menolak akses atau penulisan: akun pemilik skrip tidak memiliki izin edit atau sheet/rentang Database_Surat dilindungi. Administrator perlu memeriksa izin berbagi dan proteksi sheet.",
+  DATA_VALIDATION_ERROR: "Spreadsheet menolak nilai karena aturan validasi data pada sheet Database_Surat. Administrator perlu memeriksa aturan validasi data pada kolom sheet tersebut.",
+  DATA_SERVICE_UNAVAILABLE: "Layanan Google Spreadsheet sedang tidak tersedia sementara.",
+  DATA_WRITE_FAILED: "Operasi Spreadsheet gagal karena kendala yang belum teridentifikasi. Administrator dapat menelusuri log server dengan nomor referensi."
+};
+
+function buildLetterStorageMessage_(context, stage, code, ref) {
+  var verbs = { create: "penyimpanan", update: "pembaruan", "delete": "penghapusan" };
+  var verb = verbs[context.operation] || "perubahan";
+  var outcome;
+  if (stage === "session" || stage === "read") {
+    outcome = "Belum ada data yang diubah.";
+  } else if (stage === "write" && (code === "DATA_WRITE_DENIED" || code === "DATA_VALIDATION_ERROR")) {
+    outcome = "Perubahan kemungkinan tidak diterapkan; muat ulang arsip untuk memastikan.";
+  } else {
+    outcome = "Status " + verb + " belum dapat dipastikan dan data mungkin sudah tercatat. Muat ulang arsip untuk memeriksa sebelum mencoba kembali.";
+    if (context.operation === "create" && context.idempotent) {
+      outcome += " Mengirim ulang formulir yang sama tidak akan membuat data ganda.";
+    }
+  }
+  return LETTER_STORAGE_REASONS_[code] + " " + outcome + " " + errorRefSuffix_(code, ref);
+}
+
+// Code is embedded in the message because google.script.run (GAS direct
+// runtime) transports only the message of a thrown error, not error.code.
+function errorRefSuffix_(code, ref) {
+  return "(Kode: " + code + "; Ref: " + ref + ")";
+}
+
+// Matches the trailing "(Kode: CODE)" or "(Kode: CODE; Ref: REF)" marker.
+var ERROR_MARKER_PATTERN_ = /\(Kode: [A-Z0-9_]+(?:; Ref: [A-Za-z0-9]+)?\)$/;
+
+/**
+ * Runs one diagnostic stage ("session", "read", "write", "flush", "internal").
+ * Coded application errors
+ * (CONFIG_ERROR, SCHEMA_ERROR, AUTH_REQUIRED, ...) pass through unchanged; raw
+ * exceptions are logged with a reference and rethrown as safe coded errors.
+ * Never retries the stage.
+ */
+function runLetterStage_(context, stage, fn) {
+  try {
+    return fn();
+  } catch (error) {
+    if (isPublicAppError_(error)) throw error;
+    var code = classifySpreadsheetError_(error);
+    var ref = logLetterFailure_(context, stage, code, error);
+    var safe = appError_(code, buildLetterStorageMessage_(context, stage, code, ref));
+    safe.ref = ref;
+    safe.stage = stage;
+    throw safe;
+  }
 }
 
 // ─── User Management Domain Logic ──────────────────────────────────────────

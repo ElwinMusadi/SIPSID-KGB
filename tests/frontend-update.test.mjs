@@ -131,6 +131,30 @@ test("create surat memakai requestId stabil untuk payload sama dan menghapusnya 
   assert.match(reset, /clearPendingLetterRequest\(\)/);
 });
 
+test("submit surat memakai guard promise in-flight, menangkap target edit di awal, dan tidak membersihkan requestId saat gagal", async () => {
+  const html = await readFile(resolve(root, "Index.html"), "utf8");
+  const submit = html.match(/function submitKgbForm\(e\) \{([\s\S]*?)\n      \}/)?.[1] || "";
+
+  assert.match(html, /let letterSubmitPromise = null/);
+  assert.match(submit, /if \(letterSubmitPromise\) return letterSubmitPromise/);
+  assert.match(submit, /letterSubmitPromise = Promise\.resolve\(\)/);
+  assert.match(submit, /\.finally\(\(\) => \{\s*letterSubmitPromise = null;\s*\}\)/);
+  assert.ok(submit.indexOf("const letterIdBeingEdited = editingLetterId") < submit.indexOf("const formData = {"));
+  assert.match(submit, /throw createApiError\(result, /);
+
+  const catchBlock = submit.match(/\.catch\(error => \{([\s\S]*?)\n              \}\)/)?.[1] || "";
+  assert.doesNotMatch(catchBlock, /clearPendingLetterRequest|resetForm|setEditingMode|\.reset\(\)/);
+  assert.doesNotMatch(catchBlock, /submitKgbForm\(|api\.createLetter|api\.updateLetter|setTimeout/);
+  assert.match(catchBlock, /getSubmitErrorMessage\(error, isEditing\)/);
+
+  // Diagnostik error tidak pernah mencatat token atau payload.
+  const fetchBody = html.match(/async function fetchJson\(url, options = \{\}\) \{([\s\S]*?)\n      \}/)?.[1] || "";
+  assert.doesNotMatch(fetchBody, /console\./);
+  assert.match(fetchBody, /error\.httpStatus = response\.status/);
+  const createApiErrorBody = html.match(/function createApiError\(result, fallbackMessage, fallbackCode = ''\) \{([\s\S]*?)\n      \}/)?.[1] || "";
+  assert.doesNotMatch(createApiErrorBody, /console\.|sessionToken|getStoredSessionToken|payload|body/);
+});
+
 test("CSV mengutip semua sel, menggandakan kutip, dan menetralkan formula spreadsheet", async () => {
   const html = await readFile(resolve(root, "Index.html"), "utf8");
   const csv = html.match(/function csvCell\(value\) \{([\s\S]*?)\n      \}/)?.[1] || "";
