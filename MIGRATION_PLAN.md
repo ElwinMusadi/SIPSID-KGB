@@ -645,6 +645,26 @@ D1 lokal untuk test disediakan oleh `getPlatformProxy()` dari Wrangler sehingga 
 
 ## 11. Runbook Cutover dan Rollback
 
+### 11.0 Status persiapan Fase 5 (2026-10-15)
+
+Pemeriksaan pra-cutover (read-only kecuali flag Pages yang belum berefek):
+
+| Item | Hasil |
+|---|---|
+| `origin/main` | `c6bafd4` = tag `pre-d1-cutover`; fast-forward ke branch migrasi memungkinkan |
+| Target rollback Pages | Deployment produksi `36880ca5-b4b4-4118-8521-b4a76e5cc9dc` (commit `c6bafd4`) |
+| D1 produksi | Masih kosong (tanpa tabel aplikasi) |
+| Time Travel bookmark 1 (sebelum import) | `00000001-00000000-00005105-b1110a98292607c348eae1daa3a36dc9` |
+| Env produksi | `ALLOWED_ORIGIN`, `CLOUDFLARE_API_SECRET`, `GAS_WEB_APP_URL` semuanya `secret_text` (tidak terhapus oleh build berbasis `wrangler.toml`). Binding D1 produksi berasal dari `wrangler.toml` saat build Git, bukan dashboard |
+| Pages `MAINTENANCE_MODE` produksi | **Sudah `true`** sebagai secret. Gateway legacy `c6bafd4` mengabaikannya (produksi tetap GAS 2.5.4); flag baru berlaku pada deployment D1 pertama |
+| Pages `PASSWORD_PEPPER` produksi | **Belum diset** — langkah pemilik |
+| Uji kering pipeline cutover (salinan CSV Fase 0 → D1 lokal) | Audit PASS, transformasi READY 15/45/1.056, karantina 0, import ok, verifikasi manifest cocok; import kedua ditolak `NOT EMPTY` |
+| Review pra-cutover | **GO** untuk langkah pemilik; 4 temuan Medium ditangani (aturan pemulihan import, `ALLOWED_ORIGIN` terverifikasi secret, probe pepper, target rollback dicatat) |
+
+**Aturan pemulihan import remote:** jangan pernah menjalankan ulang import secara buta. Jika import gagal atau hasilnya tidak diketahui, hitung baris lebih dulu. Bila jumlah sudah sama dengan manifest, jalankan hanya verifikasi ekspor ke folder baru. Bila parsial, `time-travel restore` ke **bookmark 1**, lalu import ulang dengan folder `seed` yang **sama** (jangan menjalankan `prepare` ulang ke folder kerja yang sama).
+
+**Probe pepper:** setelah deployment D1, `POST /api/auth/login` dengan username yang tidak ada harus menghasilkan `400 invalid_credentials`. `502 config_error` berarti pepper belum terpasang. Kebenaran nilai pepper hanya dibuktikan oleh login pemilik.
+
 ### 11.1 Cutover
 
 1. Umumkan jadwal maintenance.
