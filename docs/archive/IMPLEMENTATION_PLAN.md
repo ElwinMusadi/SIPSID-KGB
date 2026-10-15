@@ -1,3 +1,5 @@
+> **Arsip:** dokumen ini usang dan digantikan oleh [MIGRATION_PLAN.md](../../MIGRATION_PLAN.md); kode GAS terkait hanya tersedia di tag `pre-d1-cutover`.
+
 # Implementation Plan: Dual Deployment SIPSID-KGB
 
 ## 1. Tujuan

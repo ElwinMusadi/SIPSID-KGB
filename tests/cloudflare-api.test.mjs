@@ -10,7 +10,6 @@ import {
   handleRequest,
   isAllowedOrigin,
   mapRoute,
-  normalizeGasResponse,
   normalizeResponse,
   parseCookies,
   statusForEnvelope,
@@ -496,8 +495,9 @@ test("error D1 sementara → 503 data_service_unavailable; lainnya → 502 data_
 
 // ─── normalizeResponse / status mapping (unit) ──────────────────────────────
 
-test("normalizeGasResponse adalah alias normalizeResponse", () => {
-  assert.equal(normalizeGasResponse, normalizeResponse);
+test("alias transisi normalizeGasResponse sudah dihapus (Fase 6)", async () => {
+  const gateway = await import("../functions/api/[[path]].js");
+  assert.equal("normalizeGasResponse" in gateway, false);
 });
 
 test("normalizeResponse: backendVersion di root envelope, tidak di data; gasBackendVersion tidak dipancarkan", () => {

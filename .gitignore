@@ -4,8 +4,6 @@ node_modules/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
-.clasp.json
-.clasprc.json
 *.log
 
 # Data migrasi Spreadsheet → D1: berisi nama, NIP, gaji, dan hash password. Jangan di-commit.

@@ -2,6 +2,7 @@
 // `validateLetterId_`, `validateRequestId_`, `deriveLetterIdFromRequestId_`, `createUniqueLetterId_`,
 // `listLetters_`, `createLetter_`, `updateLetter_`, `deleteLetter_` ke D1
 // (MIGRATION_PLAN.md 5.2, 5.3, 6.1, 6.2, Lampiran B).
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 //
 // `session` = hasil `auth.requireSession`: `{ userId, username, namaLengkap, hakAkses, sessionVersion }`.
 // Pengganti `revalidateActorInLock_`: guard `EXISTS (users.id + session_version [+ role])` di setiap

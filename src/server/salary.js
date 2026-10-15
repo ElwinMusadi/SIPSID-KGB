@@ -1,4 +1,5 @@
 // Master gaji (pengganti `readMasterGaji_` / `getBootstrapData_` di Code.js).
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 //
 // Urutan hasil harus sama dengan GAS: baris sheet dari atas ke bawah, lalu kolom MKG dari kiri ke
 // kanan, dipisah per status. Asumsi: `salary_grades.sort_order` = nomor baris sheet

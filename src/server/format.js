@@ -1,5 +1,6 @@
 // Format dan normalisasi nilai. Port perilaku Code.js / Index.html; tanpa dependensi dan tanpa Intl
 // agar berjalan identik di Workers dan Node.
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 
 import { appError } from './errors.js';
 

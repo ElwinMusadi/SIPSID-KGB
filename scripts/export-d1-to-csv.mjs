@@ -1,4 +1,4 @@
-// Offline-first rollback export. No writes to D1 or Google Sheets are performed.
+// Offline-first D1 CSV export (secondary, human-readable backup). Read-only: never writes to D1.
 // A remote read is possible only with explicit --database NAME --remote.
 import { readFile, writeFile, mkdir, lstat, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -59,7 +59,7 @@ export function exportSnapshot(snapshot, { allowPasswordReset = false } = {}) {
     if (!/^sha256\$[0-9a-fA-F]{32}\$[0-9a-fA-F]{64}$/.test(hash || '')) {
       if (!/^pbkdf2_sha256\$/.test(hash || '') || !allowPasswordReset) throw new Error('EXPORT_PASSWORD_RESET_REQUIRED');
       resetRows.push(userCsvRows.length + 1);
-      hash = ''; // Deliberately disables login until owner resets on GAS; never export plaintext.
+      hash = ''; // PBKDF2 hashes are not portable to the sha256$ CSV format: blank it and report the row so the password is reset after re-import. Never export plaintext.
     }
     if (!['admin', 'pengelola'].includes(user.role)) throw new Error('EXPORT_INVALID_ROLE');
     userCsvRows.push([user.username, hash, user.nama_lengkap, user.role]);
@@ -94,7 +94,7 @@ export function exportSnapshot(snapshot, { allowPasswordReset = false } = {}) {
       checksums: Object.fromEntries(TABLES.map(table => [table, canonicalChecksum(table, snapshot[table])])),
       aggregates: Object.fromEntries(TABLES.map(table => [table, tableAggregates(table, snapshot[table])])),
       passwordResetRequiredRows: resetRows,
-      note: 'Full snapshot only. Reconcile existing rows and deletions by ID before unfreezing GAS. Import NIP and identifiers as text. CSV text cells are formula-neutralized.',
+      note: 'Full snapshot only. Import NIP and identifiers as text. CSV text cells are formula-neutralized. Prefer the SQL backup (wrangler d1 export) for restores.',
     },
   };
 }

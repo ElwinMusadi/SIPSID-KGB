@@ -6,11 +6,8 @@
   "scripts": {
     "build": "npm run build:pages",
     "build:pages": "node scripts/build-pages.mjs",
-    "build:gas": "node scripts/build-gas.mjs",
     "test": "node --test tests/*.test.mjs",
-    "dev:pages": "npm run build:pages && wrangler pages dev dist",
-    "push:gas": "npm run build:gas && node scripts/push-gas.mjs",
-    "verify:gas": "node scripts/verify-gas-deployment.mjs"
+    "dev:pages": "npm run build:pages && wrangler pages dev dist"
   },
   "devDependencies": {
     "wrangler": "^4.37.1"

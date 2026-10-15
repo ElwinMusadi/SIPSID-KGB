@@ -239,9 +239,6 @@ export function normalizeResponse(value) {
   return result;
 }
 
-/** @deprecated Alias transisi; gunakan `normalizeResponse`. Dihapus pada Fase 6. */
-export const normalizeGasResponse = normalizeResponse;
-
 function extractSession(result) {
   const candidates = [
     result.sessionToken,

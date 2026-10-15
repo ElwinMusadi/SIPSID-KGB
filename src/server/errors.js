@@ -1,6 +1,7 @@
 // Error aplikasi untuk domain code (src/server/*).
 //
 // Port dari Code.js: `appError_`, `PUBLIC_ERROR_CODES_`, `isPublicAppError_`, `publicErrorMessage_`.
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 // Pesan error publik aman ditampilkan apa adanya; error lain (termasuk error D1 mentah) hanya
 // boleh keluar sebagai pesan generik. `fromD1Error` mengubah error D1 menjadi kode publik dengan
 // pesan tetap, tanpa pernah menyertakan teks error D1 (MIGRATION_PLAN.md Bagian 5.3 dan 6.2).

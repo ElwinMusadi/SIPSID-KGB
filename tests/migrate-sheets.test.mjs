@@ -88,12 +88,136 @@ function assertPrivate(output) {
     assert.equal(output.includes(sensitive), false, 'Output leaked a synthetic sensitive value');
   }
 }
-// Only the static GAS source is read, never migration-data. Independent parity reference.
+// Independent parity reference: excerpt of the legacy GAS backend (Code.js v2.5.4, removed in
+// Fase 6; full source preserved at tag `pre-d1-cutover`). Every function is copied unchanged from
+// `pre-d1-cutover:Code.js` EXCEPT `getSpreadsheet_`, which is a test stub replaced per test.
+// Never reads migration-data.
+const LEGACY_CODE_JS_EXCERPT = String.raw`
+var SHEET_NAMES_ = {
+  USERS: "Master_User",
+  SALARIES: "Master_Gaji_Pangkat",
+  LETTERS: "Database_Surat"
+};
+
+var PUBLIC_ERROR_CODES_ = [
+  "BAD_REQUEST", "PAYLOAD_TOO_LARGE", "ACTION_NOT_FOUND", "VALIDATION_ERROR", "AUTH_REQUIRED",
+  "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR",
+  "DUPLICATE_USER", "NOT_FOUND", "LAST_ADMIN_PROTECTED", "TOO_MANY_ATTEMPTS",
+  "BUSY", "DATA_WRITE_DENIED", "DATA_VALIDATION_ERROR", "DATA_SERVICE_UNAVAILABLE", "DATA_WRITE_FAILED",
+  "MAINTENANCE"
+];
+
+var LETTER_FIELDS_ = [
+  "id", "statusPegawai", "nama", "nip", "pangkat", "jabatan", "unit", "kabkot",
+  "skPejabat", "skTanggal", "skNomor", "skTmt", "mkLamaThn", "mkLamaBln", "gajiLama",
+  "mkBaruThn", "mkBaruBln", "gajiBaruTmt", "gajiBaru", "suratNomor", "suratTanggal",
+  "signJabatan", "signNama", "signPangkat", "signNip", "ukuranKertas"
+];
+
+function readMasterGaji_() {
+  var result = { status: "success", gajiPNS: [], gajiPPPK: [], errorMsg: "" };
+  try {
+    var sheet = getSpreadsheet_().getSheetByName(SHEET_NAMES_.SALARIES);
+    if (!sheet) throw appError_("CONFIG_ERROR", "Sheet Master_Gaji_Pangkat tidak ditemukan.");
+
+    var range = sheet.getDataRange();
+    var rawRows = range.getValues();
+    var displayRows = range.getDisplayValues();
+    var headers = displayRows[0] || [];
+
+    for (var i = 1; i < rawRows.length; i++) {
+      var statusPegawai = String(displayRows[i][0] || "").trim().toUpperCase();
+      var pangkat = cleanText_(displayRows[i][1], 120);
+      if ((statusPegawai !== "PNS" && statusPegawai !== "PPPK") || !pangkat) continue;
+
+      for (var j = 2; j < headers.length; j++) {
+        var match = String(headers[j]).match(/MKG\s*(\d+)\s*Tahun/i);
+        if (!match) continue;
+        var nominal = normalizeNominalGaji_(rawRows[i][j], displayRows[i][j]);
+        if (nominal === null || nominal === "0") continue;
+        var item = { mkg: Number(match[1]), pangkat: pangkat, nominal: nominal };
+        (statusPegawai === "PNS" ? result.gajiPNS : result.gajiPPPK).push(item);
+      }
+    }
+  } catch (error) {
+    result.status = "error";
+    result.errorCode = error && error.code ? error.code : "DATA_ERROR";
+    result.errorMsg = publicErrorMessage_(error);
+  }
+  return result;
+}
+
+function rowToLetter_(row) {
+  var letter = {};
+  for (var i = 0; i < LETTER_FIELDS_.length; i++) {
+    var value = row[i + 1];
+    if (["skTanggal", "skTmt", "gajiBaruTmt", "suratTanggal"].indexOf(LETTER_FIELDS_[i]) !== -1) {
+      value = normalizeDateForClient_(value);
+    }
+    letter[LETTER_FIELDS_[i]] = String(value == null ? "" : value).trim();
+  }
+  letter.mkLamaThn = letter.mkLamaThn || "0";
+  letter.mkLamaBln = letter.mkLamaBln || "0";
+  letter.mkBaruThn = letter.mkBaruThn || "0";
+  letter.mkBaruBln = letter.mkBaruBln || "0";
+  letter.ukuranKertas = (letter.ukuranKertas || "legal").toLowerCase();
+  return letter;
+}
+
+function getSpreadsheet_() {
+  throw new Error("Spreadsheet tidak tersedia di luar Apps Script; ganti getSpreadsheet_ di test.");
+}
+
+function normalizeNominalGaji_(rawValue, displayValue) {
+  if (typeof rawValue === "number" && isFinite(rawValue)) return String(rawValue);
+  var text = String(displayValue || rawValue || "").trim();
+  if (!text) return null;
+  var digits = text.replace(/[^0-9]/g, "");
+  return digits || null;
+}
+
+function normalizeDateForClient_(value) {
+  var text = String(value || "").trim();
+  if (!text) return "";
+  var iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return iso[1] + "-" + iso[2] + "-" + iso[3];
+  var local = text.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/);
+  if (local) return local[3] + "-" + pad2_(local[2]) + "-" + pad2_(local[1]);
+  return text;
+}
+
+function cleanText_(value, maxLength) {
+  return String(value == null ? "" : value).trim().substring(0, maxLength || 200);
+}
+
+function pad2_(value) {
+  return ("0" + String(value)).slice(-2);
+}
+
+function appError_(code, message) {
+  var error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function isPublicAppError_(error) {
+  return !!(error && typeof error.code === "string" && PUBLIC_ERROR_CODES_.indexOf(error.code) !== -1);
+}
+
+function publicErrorMessage_(error) {
+  if (isPublicAppError_(error)) return error.message;
+  return "Layanan sedang mengalami kendala. Silakan coba kembali.";
+}
+`;
 function gasReference() {
   const context = vm.createContext({ console });
-  vm.runInContext(fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8'), context);
+  vm.runInContext(LEGACY_CODE_JS_EXCERPT, context);
   return context;
 }
+
+test('legacy GAS excerpt keeps the D1 LETTER_FIELDS order', () => {
+  assert.deepEqual([...gasReference().LETTER_FIELDS_], [...LETTER_FIELDS]);
+});
 
 test('all sheet CSV exports transform through the shared RFC-4180 parser', () => {
   const data = transformed();

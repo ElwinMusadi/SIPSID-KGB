@@ -1,4 +1,5 @@
 // Dispatcher action backend D1 (pengganti `dispatchHttpAction_` + `doPost` di Code.js).
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 //
 // Dipanggil in-process oleh gateway `functions/api/[[path]].js` dengan binding `env.DB`
 // (MIGRATION_PLAN.md Bagian 3, 6, 6.1, Fase 1 langkah 3–5). Nama action sama dengan GAS;

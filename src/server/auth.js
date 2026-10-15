@@ -2,6 +2,7 @@
 //
 // Hanya WebCrypto (`crypto.subtle`, `crypto.getRandomValues`), TextEncoder, btoa/atob: berjalan di
 // Workers dan Node 24 tanpa Buffer/node:crypto. Seluruh SQL lewat src/server/db.js dengan ?1..?N.
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 //
 // Query D1 per operasi:
 //   requireSession / getSession : 1 (SELECT sessions JOIN users)

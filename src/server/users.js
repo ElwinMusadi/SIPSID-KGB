@@ -1,6 +1,7 @@
 // Domain manajemen pengguna (users.*): port Code.js `normalizeHakAkses_`, `isAdmin_`,
 // `validateUsername_`, `validateUsernameTarget_`, `rowToUser_`, `listUsers_`, `createUser_`,
 // `updateUser_`, `resetUserPassword_`, `deleteUser_` ke D1 (MIGRATION_PLAN.md 5.2, 5.3, 5.4, 6.1, Lampiran B).
+// Code.js = backend GAS lama, dihapus pada Fase 6; sumbernya ada di tag `pre-d1-cutover`.
 //
 // `session` = hasil `auth.requireSession(..., { admin: true })`:
 //   `{ userId, username, namaLengkap, hakAkses, sessionVersion }`.

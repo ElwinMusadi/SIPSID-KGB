@@ -1,7 +1,7 @@
 # Implementation Plan: Migrasi SIPSID-KGB ke Satu Tech Stack (Cloudflare + D1)
 
 Branch kerja: `migration/cloudflare-d1` (dibuat dari `main` @ `e2fcf05`, disinkronkan ke `main` @ `c6bafd4`).
-Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. **Fase 0–5 selesai**: produksi berjalan di Cloudflare Pages + D1 sejak 2026-10-15 (log di Bagian 11.0). Pemantauan pasca-cutover berjalan; Fase 6 (dekomisioning GAS) dijadwalkan setelah 2–4 minggu stabil.
+Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. **Fase 0–6 selesai**: produksi berjalan di satu stack Cloudflare Pages + D1 sejak 2026-10-15 (log cutover di Bagian 11.0, dekomisioning GAS di status Fase 6). Rollback ke GAS sudah ditutup.
 
 ## 1. Ringkasan
 
@@ -569,6 +569,21 @@ Dilakukan setelah 2–4 minggu stabil:
 4. Arsipkan project GAS dan jadikan Spreadsheet read-only.
 5. Perbarui `README.md`; arsipkan `IMPLEMENTATION_PLAN.md` (dual deployment).
 
+#### Status Fase 6 (2026-10-15) — dijalankan atas permintaan pemilik, lebih awal dari jadwal
+
+Pemilik memutuskan menjalankan Fase 6 segera setelah cutover, tanpa menunggu 2–4 minggu. Konsekuensinya diterima: rollback ke GAS ditutup lebih awal. Jaring pengaman yang tersisa: tag `pre-d1-cutover`, Time Travel D1 (7 hari), dan backup SQL berkala.
+
+| Langkah | Hasil |
+|---|---|
+| Cek kesehatan | Produksi `3.0.0` sehat; D1 15 user / 46 surat (1 surat baru dibuat pengguna setelah go-live) / 1.056 gaji |
+| Endpoint GAS | `clasp undeploy` dua deployment web app (`@50` produksi dan `@26` lama). URL `/exec` lama kini 404. Project GAS (scriptId `1zrM_X1N…`) tetap ada di Google Drive dengan deployment `@HEAD` internal saja |
+| Secret Pages | `GAS_WEB_APP_URL` dan `CLOUDFLARE_API_SECRET` dihapus dari produksi; kode aktif tidak pernah membacanya. Sisa: `PASSWORD_PEPPER`, `MAINTENANCE_MODE`, `ALLOWED_ORIGIN`. Produksi tetap 200 |
+| Kode | Dihapus: `Code.js`, `appsscript.json`, `gas/`, `build-gas`/`push-gas`/`verify-gas`, `tests/gas-backend.test.mjs`, alias `normalizeGasResponse`, aturan `.clasp*` di `.gitignore`, `gas/.clasp.json` lokal. `IMPLEMENTATION_PLAN.md` dipindah ke `docs/archive/`. Kode GAS tetap utuh di tag `pre-d1-cutover` |
+| Rehash password (langkah 2) | **Tidak diaktifkan.** Dengan `PASSWORD_HASH_ALGO=sha256` (keputusan K4/K8, plan Free) seluruh hash sudah `sha256$`, sehingga rehash tidak berefek. Dapat diaktifkan bersama `pbkdf2_sha256` bila naik ke Workers Paid |
+| Dokumentasi | README ditulis ulang untuk satu stack: deploy, migrasi D1, secret, maintenance, batas rollback (hanya ke deployment `d9eff2a`+), backup SQL `wrangler d1 export` (sudah diuji round-trip pada data sintetis), ekspor CSV opsional |
+| Validasi | 352/352 test, build Pages OK; excerpt GAS di test parity identik 12/12 fungsi dengan tag; review independen |
+| Langkah pemilik | Jadikan Spreadsheet **read-only** (Share → ubah editor menjadi viewer) dan arsipkan project GAS. Freeze GAS boleh tetap aktif |
+
 ## 9. Migrasi Data
 
 ### 9.1 Ekspor
@@ -680,7 +695,7 @@ Pemeriksaan pra-cutover (read-only kecuali flag Pages yang belum berefek):
 | 12:22 | Verifikasi ulang ekspor `--manifest` setelah go-live | Jumlah, agregat, dan checksum tetap cocok dengan data cutover |
 | 12:22 | Pembersihan | Data latihan Fase 0–4 dan kredensial preview dihapus. `migration-data/cutover-input` dan `cutover-work` (berisi data pribadi) dipertahankan untuk audit/rollback selama pemantauan, lalu dihapus |
 
-**Status: cutover produksi SELESAI.** Produksi melayani backend D1 `3.0.0`. Freeze GAS **tetap aktif** agar Spreadsheet tidak menerima data yang menyimpang. Masa pemantauan 24–48 jam dimulai; Fase 6 (dekomisioning GAS) setelah stabil 2–4 minggu.
+**Status: cutover produksi SELESAI.** Produksi melayani backend D1 `3.0.0`. Freeze GAS **tetap aktif** agar Spreadsheet tidak menerima data yang menyimpang. Masa pemantauan 24–48 jam dimulai. Fase 6 kemudian dijalankan pada hari yang sama atas permintaan pemilik (lihat status Fase 6).
 
 **Probe pepper:** setelah deployment D1, `POST /api/auth/login` dengan username yang tidak ada harus menghasilkan `400 invalid_credentials`. `502 config_error` berarti pepper belum terpasang. Kebenaran nilai pepper hanya dibuktikan oleh login pemilik.
 

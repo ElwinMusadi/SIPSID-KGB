@@ -1,290 +1,142 @@
 # SIPSID-KGB
 
-## Status branch migrasi Cloudflare + D1
+Aplikasi pembuatan dan arsip surat Kenaikan Gaji Berkala (KGB). Satu stack:
 
-Pada branch `migration/cloudflare-d1`, backend `/api/*` memakai Pages Functions + D1 dan frontend hanya memakai `fetch`. `npm run build` kini **hanya** menghasilkan `dist/` beserta aset lokal. Persyaratan tooling migrasi/test adalah **Node.js 24** (`node:sqlite`). Tidak ada import atau cutover produksi otomatis.
+- **Cloudflare Pages** menyajikan frontend statis dari `dist/` (dibangun dari `Index.html` + `public/`).
+- **Pages Functions** `functions/api/[[path]].js` menangani `/api/*` (routing, cookie sesi, validasi origin, batas payload 64 KiB) dan menjalankan action in-process lewat `src/server/` (`dispatch.js`, `auth.js`, `letters.js`, `users.js`, `salary.js`).
+- **Cloudflare D1** (`sipsid-kgb`, binding `DB`) menyimpan `users`, `sessions`, `login_throttle`, `letters`, dan `salary_grades`. Schema ada di `migrations/`.
 
-`Code.js`, `gas/`, serta script GAS dipertahankan sebagai referensi rollback sampai Fase 6, bukan target build aktif. Jangan menjalankan `build:gas`, `push:gas`, atau deploy GAS dari branch frontend fetch-only. Untuk rollback gunakan tag `pre-d1-cutover` di worktree terpisah; build GAS menolak frontend tanpa template sebelum menimpa artifact.
+Frontend hanya memanggil `/api/*` dengan `fetch`. Backend melaporkan `backendVersion` di setiap envelope `{ ok, data, error }`.
 
-Prosedur migrasi, tooling CSV/SQL, validasi data, dan cutover ada di [MIGRATION_PLAN.md](MIGRATION_PLAN.md). Bagian berikut menjelaskan deployment legacy yang tetap hidup di produksi **sampai cutover Fase 5**, bukan arsitektur aktif branch migrasi.
+## Struktur
 
-## Deployment legacy (referensi rollback)
+```text
+Index.html                 Source frontend (disalin apa adanya ke dist/index.html)
+public/                    _headers (CSP), 404.html, aset lokal
+functions/api/[[path]].js  Gateway Pages Functions
+src/server/                Domain backend (D1)
+migrations/                Migrasi schema D1
+scripts/build-pages.mjs    Build dist/ (menolak marker terlarang sebelum menghapus output lama)
+scripts/export-d1-to-csv.mjs        Ekspor D1 ke CSV (backup sekunder; backup utama: wrangler d1 export)
+scripts/audit-sheets.mjs, scripts/migrate-sheets-to-d1.mjs   Tooling import historis (lihat MIGRATION_PLAN.md)
+tests/                     Node test runner (D1 memakai node:sqlite)
+```
 
-Satu repository untuk dua deployment:
+## Pengembangan lokal
 
-- Google Apps Script Web App, dengan `SpreadsheetApp` sebagai data layer.
-- Cloudflare Pages, dengan Pages Functions sebagai gateway ke backend GAS yang sama.
-
-Google Sheets tetap menjadi sumber data untuk `Master_User`, `Master_Gaji_Pangkat`, dan `Database_Surat`.
-
-## Persyaratan
-
-- Node.js 20 atau lebih baru
-- npm
-- `clasp` 3.x
-- Akses Editor ke project Google Apps Script
-- Akun Cloudflare dengan Pages
-
-## Instalasi dan validasi
-
-Di branch migrasi gunakan Node.js 24 dan `npm ci`; `npm run build` hanya membangun Pages. Instruksi clasp serta artifact `gas/` pada bagian legacy berikut hanya untuk tag rollback, bukan untuk dijalankan dari branch migrasi.
+Persyaratan: **Node.js 24** (test memakai `node:sqlite`) dan npm.
 
 ```powershell
-npm install
+npm ci
 npm test
 npm run build
+Copy-Item .dev.vars.example .dev.vars   # isi PASSWORD_PEPPER lokal
+npx wrangler d1 migrations apply sipsid-kgb --local
+npx wrangler pages dev dist
 ```
 
-Artifact:
-
-```text
-dist/        Cloudflare Pages
-gas/         Google Apps Script
-```
-
-## Manajemen User (Admin only)
-
-Semua endpoint berikut memerlukan sesi dengan role `admin`. Input `administrator` dinormalisasi ke `admin`.
-
-| Method | Path | Aksi GAS | Keterangan |
-|---|---|---|---|
-| `GET` | `/api/users` | `users.list` | Daftar user tanpa password |
-| `POST` | `/api/users` | `users.create` | Buat user baru |
-| `PUT` | `/api/users/:username` | `users.update` | Ubah nama dan role; username immutable |
-| `PUT` | `/api/users/:username/password` | `users.resetPassword` | Reset password user |
-| `DELETE` | `/api/users/:username` | `users.delete` | Hapus user |
-
-## Session Restore
-
-| Method | Path | Aksi GAS | Keterangan |
-|---|---|---|---|
-| `GET` | `/api/auth/session` | `auth.session` | Validasi sesi aktif dan kembalikan identitas user |
-
-Endpoint ini digunakan frontend untuk memverifikasi sesi yang tersimpan di cookie (mis. setelah page reload) tanpa perlu login ulang. Response berisi `{ user: { username, namaLengkap, hakAkses } }`. Token tidak pernah dikembalikan ke client. Sesi tidak valid atau stale mengembalikan HTTP 401 dan gateway menghapus cookie secara otomatis.
-
-Payload `POST /api/users`: `{ username, password, namaLengkap, hakAkses }`.
-Payload `PUT /api/users/:username`: `{ namaLengkap, hakAkses }`.
-Payload `PUT /api/users/:username/password`: `{ newPassword }`.
-
-Proteksi:
-- Username URL selalu menang atas username dalam body.
-- Duplikat username ditolak case-insensitive (HTTP 409).
-- Admin terakhir tidak bisa didowngrade atau dihapus (HTTP 422).
-- Self-delete dan self role downgrade ditolak.
-- Password minimum 8 karakter; disimpan `sha256$salt$hash` dengan `PASSWORD_PEPPER`.
-
-## Arsip Surat — Create Idempotency
-
-`POST /api/letters` mendukung field opsional `requestId` untuk idempotency client-side:
-
-```json
-{ "requestId": "550e8400-e29b-41d4-a716-446655440001", "nama": "...", ... }
-```
-
-- **Tanpa `requestId`**: perilaku lama — GAS membuat ID acak (`KGB-YYYY-<UUID>`), tidak ada garansi idempotency.
-- **Dengan `requestId`**: GAS menurunkan ID deterministik `KGB-YYYY-<requestId>` dan mengecek apakah row sudah ada dalam satu ScriptLock. Jika sudah ada, mengembalikan data existing tanpa append row baru. Jika belum ada, menggunakan ID deterministik dan append.
-- Response retry memiliki `idempotent: true` di envelope root (bukan di dalam `data`).
-- `requestId` divalidasi ketat: 1–100 karakter, hanya `[A-Za-z0-9\-_]` (alphanum, hyphens, underscores). Karakter lain (spasi, titik, slash, dll.) ditolak dengan HTTP 400.
-- Client tidak bisa memilih ID arbiter melalui field `id` dalam body — hanya `requestId` yang menentukan ID surat.
-- Idempotency di-handle di GAS (server-side). Gateway tidak me-retry mutation bahkan dengan `requestId`.
-
-### Catatan sesi GAS direct (Apps Script execute-as-owner)
-
-Ketika pengguna membuka langsung URL `doGet` GAS (bukan melalui Cloudflare), sesi dikelola via `localStorage` di browser. Karena GAS dijalankan sebagai pemilik script (`USER_DEPLOYING`), `UserProperties` atau `ScriptProperties` bersifat global (shared antar pengguna) dan tidak aman untuk menyimpan session per-user. Tidak ada perubahan backend untuk path ini — sesi di mode direct berbeda dan tidak perlu persistent session di server karena token ada di `localStorage` klien.
-
-## Arsip Surat — Konfigurasi Sheet
-
-Tambahkan Script Properties melalui **Project Settings → Script Properties**:
-
-| Property | Nilai |
-|---|---|
-| `SPREADSHEET_ID` | ID Spreadsheet produksi atau test |
-| `CLOUDFLARE_API_SECRET` | Secret acak, sama dengan secret Cloudflare |
-| `SESSION_SIGNING_SECRET` | Secret acak untuk menandatangani session |
-| `PASSWORD_PEPPER` | Secret acak untuk hash password |
-| `MAINTENANCE_MODE` | Opsional. `true` = write freeze (lihat [Write freeze](#write-freeze-maintenance_mode)) |
-
-`SPREADSHEET_ID` masih mempunyai fallback ke Spreadsheet lama agar deployment GAS tidak langsung rusak. Set property tersebut sebelum production deployment.
-
-### Konfigurasi clasp
-
-Script ID berbeda dengan Deployment ID. Ambil dari Apps Script **Project Settings → IDs** lalu buat `gas/.clasp.json`:
-
-```json
-{
-  "scriptId": "REPLACE_WITH_SCRIPT_ID"
-}
-```
-
-File ini tidak di-commit. Verifikasi file yang akan dikirim:
-
-```powershell
-npm run build:gas
-Set-Location gas
-clasp show-file-status
-```
-
-Output harus hanya memuat:
-
-```text
-Code.js
-Index.html
-appsscript.json
-```
-
-Push:
-
-```powershell
-npm run push:gas
-```
-
-Script npm menjalankan build lalu menjalankan `clasp push` dengan folder `gas` sebagai working directory. **`clasp push` saja tidak memperbarui endpoint produksi `/exec`.** Setelah push, ikuti langkah di bawah.
-
-### Memperbarui deployment GAS setelah push
-
-`clasp push` hanya mengunggah source ke editor sebagai HEAD yang belum punya versi. URL `/exec` yang dikonsumsi Cloudflare tetap melayani versi lama sampai deployment yang sama secara eksplisit diperbarui ke versi baru.
-
-**Langkah wajib setelah setiap `npm run push:gas`:**
-
-1. Buka <https://script.google.com/> → project SIPSID-KGB
-2. Klik **Deploy → Manage deployments**
-3. Temukan deployment produksi (URL-nya sama dengan `GAS_WEB_APP_URL` di Cloudflare) → klik ikon **Edit** (pensil)
-4. Di dropdown **Version**, pilih **New version**
-5. Klik **Deploy** — deployment ID dan URL `/exec` tetap sama; hanya versi aktif yang diperbarui
-6. Verifikasi:
-
-```powershell
-npm run verify:gas
-```
-
-Output yang diharapkan:
-
-```text
-✔ gasBackendVersion: 2.5.4 (sesuai source)
-✔ Semua 14 aksi dikenali oleh deployment aktif
-  VERIFIKASI BERHASIL — Deployment GAS aktif sudah up-to-date.
-```
-
-Jika `verify:gas` melaporkan mismatch versi atau aksi yang tidak dikenali (termasuk `letters.update`), deployment belum aktif — ulangi langkah 3–5.
-
-Untuk menjalankan manual tanpa npm:
-
-```powershell
-npm run build:gas
-Set-Location gas
-clasp push
-```
-
-### Migrasi password
-
-1. Backup Spreadsheet.
-2. Pastikan `PASSWORD_PEPPER` sudah diatur.
-3. Jalankan fungsi `hashMasterUserPasswords` sekali dari Apps Script editor.
-4. Periksa kolom password `Master_User` sudah berbentuk `sha256$salt$hash`.
-
-Backend masih menerima plaintext lama sementara untuk transisi. Setelah migrasi berhasil, seluruh row harus berbentuk hash.
-
-### Write freeze (MAINTENANCE_MODE)
-
-Sejak GAS v2.5.4. Dipakai saat cutover ke Cloudflare D1.
-
-- **Aktifkan:** Apps Script → **Project Settings → Script Properties** → tambah/ubah `MAINTENANCE_MODE` = `true`. Hanya nilai `true` (trim, case-insensitive) yang membekukan; tidak perlu deploy ulang.
-- **Nonaktifkan:** hapus property atau isi `false`.
-- **Efek:** `letters.create/update/delete` dan `users.create/update/resetPassword/delete` ditolak dengan kode `MAINTENANCE` ("Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.") pada jalur Cloudflare (`doPost`, HTTP 503, cookie sesi tidak dihapus, tidak di-retry) maupun GAS langsung (`google.script.run`, akhiran `(Kode: MAINTENANCE)`). Penolakan terjadi sebelum validasi sesi, sebelum `ScriptLock`, dan sebelum akses sheet, sehingga tidak ada row yang tersentuh. `hashMasterUserPasswords()` juga diblokir. Baca (`letters.list`, `users.list`, `bootstrap.get`, `auth.session`) serta login/logout tetap berjalan. Frontend menampilkan pesan pemeliharaan sebagai kegagalan pasti, mempertahankan isi formulir dan `requestId` tertunda, dan tidak mengakhiri sesi.
-- **Fail-closed:** bila Script Properties gagal dibaca, mutasi tetap ditolak dengan kode `MAINTENANCE` (pesan "Status pemeliharaan aplikasi tidak dapat diperiksa ...") dan log `MAINTENANCE_FLAG_UNREADABLE`.
-- **Setelah cutover ke D1, `MAINTENANCE_MODE=true` harus tetap aktif** agar Spreadsheet lama tidak menerima tulisan baru yang tidak ikut termigrasi ke D1.
-
-## Konfigurasi Cloudflare Pages
-
-Hubungkan repository GitHub ke Cloudflare Pages:
-
-```text
-Build command: npm ci && npm run build:pages
-Build output: dist
-Production branch: main
-```
-
-Atur environment variables untuk Preview dan Production. Variables harus tersedia saat **runtime Pages Functions**, bukan hanya saat build:
-
-| Variable | Keterangan |
-|---|---|
-| `GAS_WEB_APP_URL` | URL `/exec` deployment GAS target |
-| `CLOUDFLARE_API_SECRET` | Sama dengan Script Property GAS |
-| `ALLOWED_ORIGIN` | Origin Pages, misalnya `https://sipsid-kgb.pages.dev` |
-
-Melalui dashboard: **Workers & Pages → sipsid-kgb → Settings → Variables and Secrets**. Setelah menambah atau mengubah variable, buat deployment baru.
-
-Alternatif CLI untuk production:
-
-```powershell
-"https://script.google.com/macros/s/DEPLOYMENT_ID/exec" | npx wrangler pages secret put GAS_WEB_APP_URL --project-name sipsid-kgb
-"SHARED_SECRET_YANG_SAMA_DENGAN_GAS" | npx wrangler pages secret put CLOUDFLARE_API_SECRET --project-name sipsid-kgb
-"https://sipsid-kgb.pages.dev" | npx wrangler pages secret put ALLOWED_ORIGIN --project-name sipsid-kgb
-npm run build:pages
-npx wrangler pages deploy dist --project-name sipsid-kgb --branch main
-```
-
-Verifikasi runtime binding:
-
-```powershell
-npx wrangler pages secret list --project-name sipsid-kgb
-```
-
-Untuk local preview:
-
-```powershell
-Copy-Item .dev.vars.example .dev.vars
-# Isi secret lokal, lalu:
-npm run dev:pages
-```
-
-Cloudflare browser hanya memanggil `/api/*`. Pages Functions meneruskan request ke GAS dengan shared secret dan secure session cookie.
-
-## Urutan deployment aman
-
-1. Buat salinan Spreadsheet untuk test.
-2. Set `SPREADSHEET_ID` GAS ke salinan tersebut.
-3. Build dan push GAS ke deployment test: `npm run push:gas`
-4. Perbarui deployment test ke **New version** (Deploy → Manage deployments → Edit → New version → Deploy).
-5. Arahkan Cloudflare Preview ke URL deployment GAS test.
-6. Uji login, master gaji, create, list, **update**, delete, laporan, PDF, dan **manajemen user (list, create, update, reset password, delete)** dari kedua target.
-7. Jalankan `npm run verify:gas` untuk memastikan semua aksi dikenali.
-8. Backup Spreadsheet produksi.
-9. Set production properties dan Cloudflare environment variables.
-10. Push GAS produksi: `npm run push:gas`
-11. Perbarui deployment produksi ke **New version** (langkah yang sama dengan nomor 4).
-12. Jalankan `npm run verify:gas` terhadap URL produksi.
-13. Deploy branch `main` ke Cloudflare Pages.
-
-Jangan menggunakan deployment produksi saat integration test create/delete.
+`npm run dev:pages` menjalankan build lalu `wrangler pages dev dist`. Database lokal ada di `.wrangler/` (diabaikan Git). Jangan mengisi `.dev.vars` dengan nilai produksi.
 
 ## Perintah
 
 ```powershell
-npm test             # Node test runner
-npm run build        # Pages + GAS artifacts
-npm run build:pages  # Artifact Cloudflare
-npm run build:gas    # Artifact GAS
-npm run dev:pages    # Local Pages preview
-npm run push:gas     # Build lalu clasp push (ikuti langkah update deployment setelahnya)
-npm run verify:gas   # Verifikasi deployment GAS aktif: versi dan action routing
+npm test             # Seluruh test (node --test tests/*.test.mjs)
+npm run build        # Alias build:pages
+npm run build:pages  # Bangun dist/
+npm run dev:pages    # Build + preview lokal Pages
 ```
+
+## Secrets dan variabel
+
+Diatur sebagai **Pages secrets** (Workers & Pages → sipsid-kgb → Settings → Variables and Secrets, atau `npx wrangler pages secret put <NAMA> --project-name sipsid-kgb`). Jangan ditaruh di `wrangler.toml`. Perubahan secret baru berlaku setelah **deployment baru**.
+
+| Nama | Keterangan |
+|---|---|
+| `PASSWORD_PEPPER` | Wajib. Pepper hash password. Nilainya tidak boleh diubah: seluruh hash yang ada akan gagal diverifikasi. Kosong = `CONFIG_ERROR` |
+| `MAINTENANCE_MODE` | `true` (trim, case-insensitive) menolak seluruh mutasi dengan kode `MAINTENANCE` (HTTP 503) |
+| `ALLOWED_ORIGIN` | Opsional. Origin yang diizinkan untuk mutasi, mis. `https://sipsid-kgb.pages.dev`; kosong = origin request |
+| `PASSWORD_HASH_ALGO` | Opsional. Algoritme hash password baru: `sha256` (default, cocok untuk plan Free) atau `pbkdf2_sha256`. Nilai lain = `CONFIG_ERROR` |
+| `PASSWORD_REHASH_ON_LOGIN` | Opsional. `true` = saat login berhasil, hash lama ditulis ulang bila formatnya berbeda dari `PASSWORD_HASH_ALGO`. Tidak berefek selama `PASSWORD_HASH_ALGO=sha256` (semua hash sudah `sha256$`) |
+| `PBKDF2_ITERATIONS` | Opsional, hanya untuk `pbkdf2_sha256`. 1–100000 (default 100000). Plan Free (10 ms CPU) tidak cukup untuk 100000 iterasi |
+
+Format hash yang diverifikasi: `sha256$<salt>$<hex>` dan `pbkdf2_sha256$<iterasi>$<salt>$<hash>`.
+
+## Migrasi schema D1
+
+Build Pages **tidak** menjalankan migrasi D1. Terapkan migrasi baru ke produksi **sebelum** merge perubahan schema ke `main`, agar kode baru tidak berjalan di atas schema lama:
+
+```powershell
+npx wrangler d1 migrations apply sipsid-kgb --remote
+```
+
+Uji dulu secara lokal (`--local`) dan di preview (`npx wrangler d1 migrations apply sipsid-kgb-preview --remote --env preview`). Migrasi harus kompatibel mundur dengan kode yang sedang berjalan sampai deployment baru aktif.
+
+## Deployment
+
+Cloudflare Pages terhubung ke repository GitHub; push ke `main` memicu deployment produksi, branch lain menjadi preview.
+
+```text
+Build command: npm ci && npm run build
+Build output: dist
+Production branch: main
+```
+
+Urutan aman: migrasi D1 (bila ada) → merge/push ke `main` → verifikasi login, master gaji, buat/ubah/hapus surat, laporan/PDF, dan manajemen user di produksi. Rollback kode memakai **Rollback** deployment di dashboard Pages; rollback ini tidak mengembalikan data atau schema D1.
+
+> **Batas rollback:** hanya ke deployment dari commit `d9eff2a` atau sesudahnya (backend `3.0.0`, misalnya `454985ec…`). **Jangan** rollback ke deployment dari tag `pre-d1-cutover` atau lebih lama: deployment tersebut meneruskan request ke Google Apps Script yang sudah dinonaktifkan, sehingga seluruh `/api/*` akan gagal.
+
+## Mode pemeliharaan (write freeze)
+
+1. Set secret `MAINTENANCE_MODE` = `true`:
+   `"true" | npx wrangler pages secret put MAINTENANCE_MODE --project-name sipsid-kgb`
+2. Buat deployment baru (redeploy deployment terakhir dari dashboard atau push commit) agar secret berlaku.
+3. Verifikasi: mutasi (`letters.create/update/delete`, `users.create/update/resetPassword/delete`) ditolak dengan pesan pemeliharaan; login, logout, sesi, dan seluruh pembacaan tetap berjalan. Frontend mempertahankan isi formulir dan tidak mengakhiri sesi.
+4. Nonaktifkan dengan mengisi `false` lalu redeploy lagi.
+
+## Backup dan pemulihan
+
+- **D1 Time Travel** menyimpan riwayat point-in-time selama **7 hari** pada plan Free. Catat bookmark sebelum operasi berisiko:
+  `npx wrangler d1 time-travel info sipsid-kgb`
+  Pemulihan: `npx wrangler d1 time-travel restore sipsid-kgb --bookmark=<bookmark>`. Restore bersifat **destruktif**: seluruh penulisan setelah bookmark hilang.
+- **Backup berkala (utama)** di luar jendela 7 hari, misalnya mingguan: ekspor SQL lengkap (schema, trigger, dan seluruh data) ke file bertanggal di folder yang diabaikan Git:
+  ```powershell
+  npx wrangler d1 export sipsid-kgb --remote --output=migration-data/backup/sipsid-kgb-YYYYMMDD.sql
+  ```
+  Pemulihan ke database **kosong** (database baru atau setelah dikosongkan): `npx wrangler d1 execute <nama-db> --remote --file=<file.sql>`. Format ini sudah diuji dapat dipulihkan utuh (jumlah baris dan trigger sama).
+- **Ekspor CSV (opsional, mudah dibaca manusia):** aktifkan mode pemeliharaan, lalu
+  `node scripts/export-d1-to-csv.mjs --database sipsid-kgb --remote --ack-frozen --out migration-data/backup/csv-YYYYMMDD`.
+  Gunakan folder bertanggal baru setiap kali (script menolak menimpa file). CSV tidak memuat seluruh kolom (misalnya `updated_at`), dan hash `pbkdf2_sha256$…` dikosongkan dengan `--allow-password-reset`, sehingga user tersebut perlu reset password bila dipulihkan dari CSV. Untuk pemulihan, utamakan backup SQL.
+- File backup berisi nama, NIP, gaji, dan hash password: perlakukan sebagai rahasia, jangan di-commit, dan simpan di penyimpanan aman di luar komputer kerja.
+
+## API
+
+Seluruh endpoint mengembalikan `{ ok, data, error, backendVersion }`. Mutasi wajib `Content-Type: application/json` dan header `Origin` yang cocok.
+
+| Method | Path | Action |
+|---|---|---|
+| `POST` | `/api/auth/login` | `auth.login` (set cookie sesi `HttpOnly; Secure; SameSite=Strict`) |
+| `POST` | `/api/auth/logout` | `auth.logout` |
+| `GET` | `/api/auth/session` | `auth.session` |
+| `GET` | `/api/bootstrap` | `bootstrap.get` (master gaji) |
+| `GET` / `POST` | `/api/letters` | `letters.list` / `letters.create` |
+| `PUT` / `DELETE` | `/api/letters/:id` | `letters.update` / `letters.delete` |
+| `GET` / `POST` | `/api/users` | `users.list` / `users.create` (admin) |
+| `PUT` / `DELETE` | `/api/users/:username` | `users.update` / `users.delete` (admin) |
+| `PUT` | `/api/users/:username/password` | `users.resetPassword` (admin) |
+
+- `POST /api/letters` menerima `requestId` opsional (1–100 karakter `[A-Za-z0-9_-]`) untuk idempotency: ID surat menjadi `KGB-<tahun WITA>-<requestId>` dan replay mengembalikan surat yang sama dengan `idempotent: true` di root envelope. Mutasi tidak pernah di-retry otomatis.
+- ID pada URL dan username pada URL selalu menang atas nilai dalam body.
+- Sesi disimpan di tabel `sessions` (TTL 8 jam) dan dicabut saat reset password, perubahan role, atau penghapusan user. Sesi tidak valid mengembalikan HTTP 401 dan cookie dihapus.
 
 ## Catatan keamanan
 
-- Jangan commit `.dev.vars`, `.clasp.json`, atau `.clasprc.json`.
-- Rotasi password lama karena sebelumnya pernah tertanam di frontend/history Git.
-- Rotasi shared secret jika pernah muncul dalam log atau commit.
-- Penghapusan surat dibatasi untuk role `admin`.
-- Manajemen user (list, create, update, reset password, delete) hanya dapat diakses role `admin`. Input `administrator` dinormalisasi ke `admin`.
-- Admin terakhir dilindungi dari downgrade role dan penghapusan. Self-delete dan self role downgrade juga ditolak.
-- Password existing disimpan dalam format kompatibel `sha256$salt$hash` dengan `PASSWORD_PEPPER`. `CONFIG_ERROR` dikembalikan bila pepper kosong, termasuk saat verifikasi password hash yang sudah ada. Jalankan `hashMasterUserPasswords()` dan audit agar tidak ada password plaintext sebelum produksi. Upgrade ke KDF adaptif berformat berversi tetap menjadi pekerjaan keamanan lanjutan; jangan menghapus kompatibilitas hash lama sebelum migrasi terukur selesai.
-- Token sesi untuk seluruh operasi terautentikasi (`letters.*`, `users.*`, dan `auth.session`) menyertakan `sv` (session version) — fingerprint deterministik dari `SHA-256(storedPasswordField + "|" + role).substring(0, 16)`. Setiap request memverifikasi `sv` dan role terhadap row live di sheet sehingga token lama tidak berlaku setelah reset password, perubahan role, atau delete. Token tanpa `sv` ditolak.
-- Username baru (`users.create`) divalidasi ketat: 1–64 karakter, hanya `[A-Za-z0-9._-]`, mulai huruf/digit, **tanpa truncation**. Username target (`update/resetPassword/delete`) divalidasi lebih permisif: 1–100 karakter, tanpa control chars, untuk mendukung legacy username dengan spasi.
-- Login throttle server-side memakai satu state Script Properties yang dibatasi maksimal 200 username-hash dan dilindungi `ScriptLock`; `CacheService` hanya optimasi. Username yang tidak terdaftar berbagi satu bucket sehingga flood nama acak tidak memenuhi state atau mengunci akun sah. Entry aktif tidak pernah dieviction untuk username baru. Penolakan throttle memakai respons publik yang sama dengan kredensial salah agar keberadaan username tidak dapat diidentifikasi dari status atau error code.
-- `validateUserSheet_` memeriksa minimal 4 kolom dan header A–D yang dikenali (case-insensitive, termasuk variasi legacy: `Hak Akses`, `role`, `Nama Lengkap`, dll). Sheet tanpa header menghasilkan `SCHEMA_ERROR`.
-- Gateway Cloudflare menghapus session cookie (`Max-Age=0`) saat upstream mengembalikan `AUTH_REQUIRED`, `SESSION_EXPIRED`, atau `INVALID_SESSION`, termasuk pada endpoint `GET /api/auth/session`.
-- Endpoint GAS tetap publik secara jaringan agar dapat dipanggil Cloudflare, tetapi action HTTP ditolak tanpa shared secret dan session valid.
-- Gateway menggunakan timeout 28 detik untuk mengakomodasi GAS cold start. Safe/idempotent actions (`bootstrap.get`, `letters.list`, `users.list`, `auth.session`, `system.manifest`) di-retry sekali pada network abort atau upstream 502/503/504 dengan backoff 200ms. Login tidak pernah di-retry karena setiap attempt mengonsumsi throttle slot di GAS. Mutations tidak pernah di-retry.
-- Field `kabkot` tidak lagi wajib diisi pada create/update surat — empty string diterima dan disimpan di kolom yang benar. Field required lain tetap divalidasi.
-- Sejak GAS v2.5.2, mutasi surat menunggu `ScriptLock` maksimal 10 detik. Kegagalan lock dan exception Spreadsheet pada create/update/delete dikembalikan sebagai kode aman: `BUSY` (503, belum ada data diubah), `DATA_WRITE_DENIED` (403, izin/proteksi sheet), `DATA_VALIDATION_ERROR` (422, aturan validasi data sheet), `DATA_SERVICE_UNAVAILABLE` (503), dan `DATA_WRITE_FAILED` (502). Pesan memuat `(Kode: ...; Ref: XXXXXXXX)`. Sejak v2.5.3, kegagalan membaca sesi (Master_User) sebelum lock juga dikembalikan dengan kode aman dan Ref (stage `session`, belum ada data diubah), dan error publik lain dari `apiCreateLetter`/`apiUpdateLetter`/`apiDeleteLetter` (mis. `VALIDATION_ERROR`, `AUTH_REQUIRED`, `FORBIDDEN`) diberi akhiran `(Kode: CODE)` karena `google.script.run` hanya meneruskan message. Respons `not_found` menyertakan `errorCode: "NOT_FOUND"`. Log eksekusi GAS (cari Ref di Apps Script → Executions) hanya memuat field teknis yang diredaksi: Ref, actor, ID record, operasi, stage (`session`/`lock`/`read`/`write`/`flush`/`internal`), kode, alasan teknis hasil klasifikasi, nama error dari allowlist, panjang pesan, dan frame stack tersanitasi (`fungsi@file:baris:kolom`). Pesan exception asli dan raw stack tidak pernah dicatat karena exception Spreadsheet dapat memuat nilai sel yang ditolak (mis. NIP/nama). Kegagalan write/flush tidak di-retry karena data mungkin sudah tercatat; create memakai `requestId` yang sama untuk retry aman.
+- Jangan commit `.dev.vars`, CSV, file `*.seed.sql`, atau isi `migration-data/`.
+- Penghapusan surat dan manajemen user hanya untuk role `admin`; input `administrator` dinormalisasi ke `admin`.
+- Admin terakhir dilindungi dari downgrade dan penghapusan (trigger D1, HTTP 422). Self-delete dan self-downgrade ditolak.
+- Username baru: 1–64 karakter `[A-Za-z0-9._-]`, diawali huruf/digit, unik tanpa membedakan huruf besar/kecil. Password baru minimal 8 karakter.
+- Login throttle server-side: 5 percobaan per 5 menit; username tidak terdaftar berbagi satu bucket, dan penolakan throttle memakai respons yang sama dengan kredensial salah.
+- Error D1 mentah tidak pernah dikirim ke klien; log tidak memuat payload, NIP, atau teks exception.
+
+## Riwayat
+
+Backend Google Apps Script + Spreadsheet telah dipensiunkan; lihat [MIGRATION_PLAN.md](MIGRATION_PLAN.md) dan tag `pre-d1-cutover` untuk kode lama. Rencana dual-deployment lama diarsipkan di [docs/archive/IMPLEMENTATION_PLAN.md](docs/archive/IMPLEMENTATION_PLAN.md).
