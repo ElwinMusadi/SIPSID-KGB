@@ -1,7 +1,7 @@
 # Implementation Plan: Migrasi SIPSID-KGB ke Satu Tech Stack (Cloudflare + D1)
 
 Branch kerja: `migration/cloudflare-d1` (dibuat dari `main` @ `e2fcf05`, disinkronkan ke `main` @ `c6bafd4`).
-Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Persiapan teknis Fase 0 serta **Fase 1–4 selesai**; status per langkah dan batas validasi ada di Bagian 8. Cutover produksi belum dilakukan; gerbang login pemilik/pepper produksi tetap wajib pada Fase 5.
+Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. **Fase 0–5 selesai**: produksi berjalan di Cloudflare Pages + D1 sejak 2026-10-15 (log di Bagian 11.0). Pemantauan pasca-cutover berjalan; Fase 6 (dekomisioning GAS) dijadwalkan setelah 2–4 minggu stabil.
 
 ## 1. Ringkasan
 
@@ -674,6 +674,13 @@ Pemeriksaan pra-cutover (read-only kecuali flag Pages yang belum berefek):
 | 12:12 | Time Travel **bookmark 2** (berisi data, sebelum go-live) | `00000002-00000030-00005105-34aaeafeba1303d865e3259368999fa0` |
 | 12:13 | Fast-forward `main` `c6bafd4 → d9eff2a` (commit yang sama dengan branch migrasi yang diuji) | Deployment produksi `2e58d062-d3ad-4839-b899-05b01146bcb8` sukses |
 | 12:20 | Verifikasi produksi | `backendVersion 3.0.0`; master gaji 530 PNS / 526 PPPK; mutasi `503 maintenance`; probe pepper `400 invalid_credentials`; sesi anonim 401 |
+| 12:16 | **Gerbang login pemilik** saat D1 masih frozen | Admin dan pengelola berhasil login dengan password lama → hash hasil import dan pepper produksi terbukti cocok |
+| 12:18 | Pages `MAINTENANCE_MODE=false` + **Retry** deployment `2e58d062` untuk commit yang sama | Deployment produksi `454985ec-d20d-44c7-a561-d70975f65ac6`, commit `d9eff2a`, sukses. Akses tulis dibuka |
+| 12:20 | Smoke test tulis dengan akun admin sementara (hash PBKDF2, tanpa akun/password asli) | **8/8**: login, daftar 45 surat, create surat UJI CUTOVER, replay idempoten, update, delete, logout, jumlah kembali 15/45/1.056. Surat uji dan akun sementara dihapus |
+| 12:22 | Verifikasi ulang ekspor `--manifest` setelah go-live | Jumlah, agregat, dan checksum tetap cocok dengan data cutover |
+| 12:22 | Pembersihan | Data latihan Fase 0–4 dan kredensial preview dihapus. `migration-data/cutover-input` dan `cutover-work` (berisi data pribadi) dipertahankan untuk audit/rollback selama pemantauan, lalu dihapus |
+
+**Status: cutover produksi SELESAI.** Produksi melayani backend D1 `3.0.0`. Freeze GAS **tetap aktif** agar Spreadsheet tidak menerima data yang menyimpang. Masa pemantauan 24–48 jam dimulai; Fase 6 (dekomisioning GAS) setelah stabil 2–4 minggu.
 
 **Probe pepper:** setelah deployment D1, `POST /api/auth/login` dengan username yang tidak ada harus menghasilkan `400 invalid_credentials`. `502 config_error` berarti pepper belum terpasang. Kebenaran nilai pepper hanya dibuktikan oleh login pemilik.
 
