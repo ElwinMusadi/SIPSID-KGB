@@ -1,7 +1,7 @@
 # Implementation Plan: Migrasi SIPSID-KGB ke Satu Tech Stack (Cloudflare + D1)
 
 Branch kerja: `migration/cloudflare-d1` (dibuat dari `main` @ `e2fcf05`, disinkronkan ke `main` @ `c6bafd4`).
-Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Fase 0 sedang berjalan; status per langkah ada di Bagian 8 (Fase 0).
+Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Fase 0 dan **Fase 1 selesai**; status per langkah ada di Bagian 8.
 
 ## 1. Ringkasan
 
@@ -406,6 +406,24 @@ Catatan implementasi:
 - Hitung tahun pada ID `KGB-<tahun>-…` dan tanggal default secara eksplisit di UTC+8 (Asia/Makassar), karena runtime berjalan di UTC.
 
 **Selesai jika:** seluruh test kontrak gateway, golden-response test, test kode error, dan test domain lulus terhadap D1 lokal.
+
+#### Status Fase 1 (2026-10-15) — ✅ Selesai
+
+| Bagian | Hasil |
+|---|---|
+| Schema | `migrations/0001_initial.sql`; diverifikasi dengan `wrangler d1 migrations apply --local`. Satu perubahan dari Lampiran A: `users.id` memakai `AUTOINCREMENT` agar id user yang dihapus tidak dipakai ulang |
+| Backend | `src/server/{db,errors,format,auth,salary,letters,users,dispatch}.js`, `BACKEND_VERSION = 3.0.0` |
+| Gateway | `functions/api/[[path]].js` menjalankan `dispatch` langsung dengan `env.DB`; fetch ke GAS, timeout, dan retry dihapus; kontrak route, cookie, origin, payload, dan envelope dipertahankan |
+| Konfigurasi | Binding D1 produksi dan preview di `wrangler.toml`; `PASSWORD_PEPPER` dan `MAINTENANCE_MODE` sebagai Pages secret |
+| Test | 429 test lulus, termasuk schema D1, domain, dispatcher, kontrak gateway, golden response, dan kasus keamanan |
+| Smoke test end-to-end | `wrangler pages dev` + D1 lokal dengan data sintetis: **18/18** (login, sesi, CRUD surat + replay idempoten, user, kode 403/404/422, origin asing, logout mencabut sesi di server) |
+| Review independen | **APPROVED**; 5 temuan Low diperbaiki (timing login saat throttle, cek pepper di awal login, `AUTOINCREMENT`, kontrak `expiresIn`, test keamanan tambahan) |
+
+Catatan:
+
+- Throttle login dan penolakan login karena kredensial salah sama-sama mengembalikan `400 invalid_credentials`; `429 too_many_attempts` tidak lagi dipakai.
+- `action_not_found` → 404; `version_conflict` → 409 (disiapkan untuk K6).
+- Uji konkurensi throttle dan timing login dijalankan di D1 preview pada Fase 4.
 
 ### Fase 2 — Tooling migrasi data
 
