@@ -233,6 +233,45 @@ test('create dengan requestId: id deterministik, replay idempotent tanpa baris k
   assert.equal(count(db), 1);
 });
 
+test('create dengan requestId: bentrok seq saja (balapan MAX(seq)) → DATA_WRITE_FAILED, tidak idempotent, tanpa baris baru', async () => {
+  const { db, peng, admin } = await setup();
+  const existing = await createLetter(db, admin, payload({ nama: 'Milik Orang Lain', requestId: 'req-lain' }), NOW);
+  const before = db.sqlite.prepare('SELECT * FROM letters ORDER BY seq').all();
+
+  // Paksa INSERT memakai seq yang sudah terpakai (meniru dua create bersamaan membaca MAX(seq) yang sama).
+  const MAX_SEQ = '(SELECT COALESCE(MAX(seq), 0) + 1 FROM letters)';
+  let rewritten = 0;
+  const racing = {
+    prepare(sql) {
+      if (sql.includes(MAX_SEQ)) {
+        rewritten += 1;
+        return db.prepare(sql.replace(MAX_SEQ, '(SELECT MAX(seq) FROM letters)'));
+      }
+      return db.prepare(sql);
+    },
+  };
+
+  for (const requestId of ['req-baru-1', 'req-baru-1', 'req-baru-2']) {
+    await assert.rejects(createLetter(racing, peng, payload({ requestId }), NOW), (err) => {
+      assert.equal(err.code, 'DATA_WRITE_FAILED');
+      assert.equal(err.idempotent, undefined);
+      assert.doesNotMatch(err.message, /UNIQUE|seq|D1_ERROR/);
+      return true;
+    });
+  }
+  assert.equal(rewritten, 3);
+  assert.deepEqual(db.sqlite.prepare('SELECT * FROM letters ORDER BY seq').all(), before);
+  assert.equal(count(db), 1);
+  assert.equal(count(db, "SELECT COUNT(*) AS n FROM letters WHERE request_id LIKE 'req-baru-%'"), 0);
+
+  // Tanpa bentrok, requestId yang sama berhasil sebagai surat BARU (bukan replay surat lain).
+  const retry = await createLetter(db, peng, payload({ requestId: 'req-baru-1' }), NOW);
+  assert.equal(retry.idempotent, undefined);
+  assert.equal(retry.data.id, 'KGB-2026-req-baru-1');
+  assert.notEqual(retry.data.id, existing.data.id);
+  assert.equal(count(db), 2);
+});
+
 test('create replay: data lama dengan request_id NULL dan id sama → idempotent (N6)', async () => {
   const { db, peng, admin } = await setup();
   const legacy = await createLetter(db, admin, payload({ nama: 'Lama' }), NOW);

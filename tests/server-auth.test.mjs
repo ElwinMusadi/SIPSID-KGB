@@ -73,6 +73,40 @@ async function seedUser(db, { username, password = 'Password123!', role = 'penge
   );
 }
 
+/** Proxy yang melempar error D1 untuk SQL yang cocok `match` (pola sama dengan server-users.test.mjs). */
+function failing(db, message, match = /./) {
+  return {
+    prepare(sql) {
+      if (!match.test(sql)) return db.prepare(sql);
+      const fail = async () => {
+        throw new Error(message, { cause: new Error(message.replace(/^D1_ERROR: /, '')) });
+      };
+      const stmt = { bind: () => stmt, all: fail, first: fail, run: fail, raw: fail };
+      return stmt;
+    },
+    batch(stmts) {
+      return db.batch(stmts);
+    },
+  };
+}
+
+/** Menghitung pemanggilan `crypto.subtle[method]` selama `fn` berjalan. */
+async function countSubtle(method, fn) {
+  const proto = Object.getPrototypeOf(globalThis.crypto.subtle);
+  const original = proto[method];
+  let calls = 0;
+  proto[method] = function counted(...args) {
+    calls += 1;
+    return original.apply(this, args);
+  };
+  try {
+    await fn();
+  } finally {
+    proto[method] = original;
+  }
+  return calls;
+}
+
 // ─── 1. Crypto & Password Tests ─────────────────────────────────────────────
 
 test('auth: sha256Hex produces correct digest for ASCII and UTF-8 strings', async () => {
@@ -588,6 +622,153 @@ test('auth: unknown user, wrong password, and throttled return byte-identical er
   assert.equal(errUnknown.message, AUTH_MESSAGES.INVALID_CREDENTIALS);
   assert.equal(errWrongPass.message, AUTH_MESSAGES.INVALID_CREDENTIALS);
   assert.equal(errThrottled.message, AUTH_MESSAGES.INVALID_CREDENTIALS);
+});
+
+test('auth: throttled, unknown-user, and wrong-password paths each run exactly one password derivation', async () => {
+  const pbkdf2Env = { PASSWORD_PEPPER: PEPPER, PASSWORD_HASH_ALGO: 'pbkdf2_sha256', PBKDF2_ITERATIONS: 1000 };
+  const db = createTestDb();
+  await seedUser(db, { username: 'timing', hash: await hashPassword('TimingPass123!', pbkdf2Env) });
+  const attempt = (username, password) => login(db, pbkdf2Env, { username, password });
+  const isInvalid = (err) => err.code === 'INVALID_CREDENTIALS' && err.message === AUTH_MESSAGES.INVALID_CREDENTIALS;
+
+  const wrongPassword = await countSubtle('deriveBits', () => assert.rejects(attempt('timing', 'Wrong!'), isInvalid));
+  const unknownUser = await countSubtle('deriveBits', () => assert.rejects(attempt('nobody', 'Wrong!'), isInvalid));
+  for (let i = 0; i < THROTTLE_MAX_ATTEMPTS - 1; i += 1) await assert.rejects(attempt('timing', 'Wrong!'), isInvalid);
+  // Percobaan ke-6 ditolak throttle walau password benar, tetapi derivasi tetap berjalan.
+  const throttled = await countSubtle('deriveBits', () => assert.rejects(attempt('timing', 'TimingPass123!'), isInvalid));
+
+  assert.deepEqual({ wrongPassword, unknownUser, throttled }, { wrongPassword: 1, unknownUser: 1, throttled: 1 });
+
+  // Algoritme sha256 (default): jumlah digest identik di ketiga jalur (throttle key + verifikasi).
+  const shaDb = createTestDb();
+  await seedUser(shaDb, { username: 'timing', password: 'TimingPass123!' });
+  const shaAttempt = (username, password) => login(shaDb, DEFAULT_ENV, { username, password });
+  const shaWrong = await countSubtle('digest', () => assert.rejects(shaAttempt('timing', 'Wrong!'), isInvalid));
+  const shaUnknown = await countSubtle('digest', () => assert.rejects(shaAttempt('nobody', 'Wrong!'), isInvalid));
+  for (let i = 0; i < THROTTLE_MAX_ATTEMPTS - 1; i += 1) await assert.rejects(shaAttempt('timing', 'Wrong!'), isInvalid);
+  const shaThrottled = await countSubtle('digest', () => assert.rejects(shaAttempt('timing', 'TimingPass123!'), isInvalid));
+  assert.equal(shaWrong, 2);
+  assert.equal(shaUnknown, shaWrong);
+  assert.equal(shaThrottled, shaWrong);
+});
+
+test('auth: missing PASSWORD_PEPPER → CONFIG_ERROR for known and unknown users alike, before any query', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'known', password: 'KnownPassword123!' });
+  const noQueries = {
+    prepare() {
+      throw new Error('no D1 query may run when PASSWORD_PEPPER is missing');
+    },
+    batch() {
+      throw new Error('no D1 batch may run when PASSWORD_PEPPER is missing');
+    },
+  };
+
+  for (const env of [{}, { PASSWORD_PEPPER: '' }, { PASSWORD_HASH_ALGO: 'pbkdf2_sha256' }, null]) {
+    const errors = [];
+    for (const [username, password] of [['known', 'KnownPassword123!'], ['known', 'Wrong!'], ['ghost', 'Whatever1!']]) {
+      errors.push(await login(noQueries, env, { username, password }).then(() => null, (e) => e));
+      errors.push(await login(db, env, { username, password }).then(() => null, (e) => e));
+    }
+    for (const error of errors) {
+      assert.ok(error);
+      assert.equal(error.code, 'CONFIG_ERROR');
+      assert.equal(error.message, AUTH_MESSAGES.PEPPER_MISSING_VERIFY);
+    }
+  }
+  // PASSWORD_HASH_ALGO tidak dikenal juga CONFIG_ERROR identik untuk akun dikenal dan tidak dikenal.
+  const badAlgo = { PASSWORD_PEPPER: PEPPER, PASSWORD_HASH_ALGO: 'md5' };
+  const algoErrors = [
+    await login(db, badAlgo, { username: 'known', password: 'KnownPassword123!' }).then(() => null, (e) => e),
+    await login(db, badAlgo, { username: 'ghost', password: 'Whatever1!' }).then(() => null, (e) => e),
+  ];
+  assert.equal(algoErrors[0].code, 'CONFIG_ERROR');
+  assert.deepEqual([algoErrors[1].code, algoErrors[1].message], [algoErrors[0].code, algoErrors[0].message]);
+  // Throttle tidak dikonsumsi sama sekali.
+  assert.equal((await first(db, 'SELECT COUNT(*) AS n FROM login_throttle')).n, 0);
+  // Input kosong tetap INVALID_CREDENTIALS (validasi input lebih dulu).
+  await assert.rejects(login(noQueries, {}, { username: '', password: 'x' }), (err) => err.code === 'INVALID_CREDENTIALS');
+});
+
+test('auth: throttle upsert error is fail-closed → INVALID_CREDENTIALS even with the correct password', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'failclosed', password: 'FailClosed123!' });
+  const broken = failing(db, 'D1_ERROR: Network connection lost.', /INSERT INTO login_throttle/);
+  await assert.rejects(
+    login(broken, DEFAULT_ENV, { username: 'failclosed', password: 'FailClosed123!' }),
+    (err) => err.code === 'INVALID_CREDENTIALS' && err.message === AUTH_MESSAGES.INVALID_CREDENTIALS,
+  );
+  assert.equal((await first(db, 'SELECT COUNT(*) AS n FROM sessions')).n, 0);
+});
+
+test('auth: user lookup error consumes the unknown bucket; INVALID_CREDENTIALS once the bucket is full', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'lookup', password: 'LookupPass123!' });
+  const broken = failing(db, 'D1_ERROR: Network connection lost.', /FROM users WHERE username/);
+  const t0 = 1700000000000;
+
+  for (let i = 0; i < THROTTLE_MAX_ATTEMPTS; i += 1) {
+    await assert.rejects(login(broken, DEFAULT_ENV, { username: 'lookup', password: 'LookupPass123!' }, t0), (err) => {
+      assert.equal(err.code, 'DATA_SERVICE_UNAVAILABLE');
+      assert.doesNotMatch(err.message, /D1_ERROR|Network connection lost/);
+      return true;
+    });
+  }
+  const bucket = await first(db, 'SELECT count FROM login_throttle');
+  assert.equal(bucket.count, THROTTLE_MAX_ATTEMPTS);
+
+  await assert.rejects(
+    login(broken, DEFAULT_ENV, { username: 'lookup', password: 'LookupPass123!' }, t0 + 1000),
+    (err) => err.code === 'INVALID_CREDENTIALS' && err.message === AUTH_MESSAGES.INVALID_CREDENTIALS,
+  );
+  // Bucket yang sama dipakai username tidak dikenal; akun yang dikenal tetap bisa login lewat DB sehat.
+  await assert.rejects(
+    login(db, DEFAULT_ENV, { username: 'ghost', password: 'x' }, t0 + 2000),
+    (err) => err.code === 'INVALID_CREDENTIALS',
+  );
+  const ok = await login(db, DEFAULT_ENV, { username: 'lookup', password: 'LookupPass123!' }, t0 + 3000);
+  assert.equal(ok.status, 'success');
+});
+
+test('auth: rehash compare-and-swap loses to a concurrent password reset (new hash untouched)', async () => {
+  const db = createTestDb();
+  const legacyHash = legacyHashReference('0123456789abcdef0123456789abcdef', 'OldPassword123!', PEPPER);
+  const user = await seedUser(db, { username: 'racer', hash: legacyHash });
+  const rehashEnv = {
+    PASSWORD_PEPPER: PEPPER,
+    PASSWORD_HASH_ALGO: 'pbkdf2_sha256',
+    PBKDF2_ITERATIONS: 1000,
+    PASSWORD_REHASH_ON_LOGIN: 'true',
+  };
+  const resetHash = await hashPassword('ResetByAdmin123!', DEFAULT_ENV);
+
+  // Reset admin terjadi di antara SELECT user dan batch login (mensimulasikan users.resetPassword).
+  let batchStatements = 0;
+  const racing = {
+    prepare: (sql) => db.prepare(sql),
+    async batch(stmts) {
+      batchStatements = stmts.length;
+      db.sqlite
+        .prepare('UPDATE users SET password_hash = ?, session_version = session_version + 1, version = version + 1 WHERE id = ?')
+        .run(resetHash, user.id);
+      return db.batch(stmts);
+    },
+  };
+
+  const res = await login(racing, rehashEnv, { username: 'racer', password: 'OldPassword123!' });
+  assert.equal(res.status, 'success');
+  assert.equal(batchStatements, 5, 'rehash UPDATE was part of the batch');
+
+  const stored = await first(db, 'SELECT password_hash, session_version FROM users WHERE id = ?1', user.id);
+  assert.equal(stored.password_hash, resetHash, 'reset hash must not be overwritten by the rehash');
+  assert.equal(stored.session_version, 2);
+  // Sesi dari login yang kalah balapan memakai session_version lama sehingga langsung basi.
+  await assert.rejects(
+    requireSession(db, res.sessionToken),
+    (err) => err.code === 'AUTH_REQUIRED' && err.message === AUTH_MESSAGES.SESSION_STALE,
+  );
+  assert.equal(await verifyPassword('ResetByAdmin123!', stored.password_hash, rehashEnv), true);
+  assert.equal(await verifyPassword('OldPassword123!', stored.password_hash, rehashEnv), false);
 });
 
 // ─── 4. Logout & getSession Tests ───────────────────────────────────────────

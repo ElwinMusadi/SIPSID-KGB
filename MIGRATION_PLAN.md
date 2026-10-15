@@ -225,7 +225,7 @@ Respons tetap `{ ok, data, error: { code, message } }` dengan kode error lowerca
 
 | Action | Hasil dispatcher | `data` yang diterima frontend |
 |---|---|---|
-| `auth.login` | `{ status, sessionToken, expiresIn, user }` | `{ expiresIn, user }`; token hanya dipakai gateway untuk cookie |
+| `auth.login` | `{ status, sessionToken, expiresIn, user }` | `{ user }`; `sessionToken` dan `expiresIn` dibuang gateway: token hanya untuk cookie, masa berlaku dibawa `Max-Age` cookie |
 | `auth.logout` | `{ status }` | `{}` |
 | `auth.session` | `{ status, user }` | `{ user }` |
 | `bootstrap.get` | `{ status, gajiPNS, gajiPPPK, errorMsg }` | `{ gajiPNS, gajiPPPK }` |
@@ -597,7 +597,7 @@ Rollback ke GAS hanya mungkin sebelum Fase 6.
 
 ```sql
 CREATE TABLE users (
-  id              INTEGER PRIMARY KEY,
+  id              INTEGER PRIMARY KEY AUTOINCREMENT, -- id user tidak pernah dipakai ulang
   username        TEXT    NOT NULL COLLATE NOCASE
                   CHECK (length(username) BETWEEN 1 AND 100 AND username = trim(username)),
   password_hash   TEXT    NOT NULL

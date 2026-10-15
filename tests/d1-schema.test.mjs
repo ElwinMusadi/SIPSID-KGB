@@ -249,6 +249,34 @@ test('users: username UNIQUE is case-insensitive and lookups use NOCASE', async 
   assert.equal(found.username, 'Admin', 'canonical stored username is returned');
 });
 
+test('users: id is AUTOINCREMENT — deleting the highest-id user never lets a new user reuse it', async () => {
+  const db = createTestDb();
+  await addUser(db, 'admin', 'admin');
+  await addUser(db, 'satu');
+  const highest = await addUser(db, 'dua');
+  assert.equal(highest.id, 3);
+  const { session_version: sv } = highest;
+  await run(
+    db,
+    "INSERT INTO sessions (token_hash, user_id, session_version, expires_at) VALUES (?1, ?2, ?3, '2099-01-01T00:00:00.000Z')",
+    'f'.repeat(64),
+    highest.id,
+    sv,
+  );
+
+  await run(db, 'DELETE FROM users WHERE id = ?1', highest.id);
+  const next = await addUser(db, 'tiga');
+  assert.equal(next.id, 4, 'id 3 must not be reused');
+  assert.equal(await first(db, 'SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?1', next.id).then((r) => r.n), 0);
+
+  // Juga setelah semua user non-admin dihapus (MAX(id) = 1): sqlite_sequence tetap mengingat id tertinggi.
+  await run(db, "DELETE FROM users WHERE role <> 'admin'");
+  const afterWipe = await addUser(db, 'empat');
+  assert.equal(afterWipe.id, 5);
+  const seq = await first(db, "SELECT seq FROM sqlite_sequence WHERE name = 'users'");
+  assert.equal(seq.seq, 5);
+});
+
 test('letters: valid row with kabkot NULL and defaults', async () => {
   const db = createTestDb();
   const row = letter({ kabkot: null });

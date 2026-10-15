@@ -3,8 +3,11 @@
 -- Sumber: MIGRATION_PLAN.md Lampiran A. Setiap CHECK diverifikasi di SQLite (node:sqlite 3.53)
 -- dan D1 lokal (wrangler d1 migrations apply --local); lihat tests/d1-schema.test.mjs.
 --
--- Deviasi dari Lampiran A: tidak ada. DDL di bawah identik secara semantik dengan draft;
--- hanya komentar ditambahkan. Catatan verifikasi:
+-- Deviasi dari draft awal Lampiran A: `users.id` memakai `INTEGER PRIMARY KEY AUTOINCREMENT`
+-- (Lampiran A sudah diperbarui). Tanpa AUTOINCREMENT, SQLite memakai MAX(rowid)+1 sehingga id user
+-- tertinggi yang dihapus dapat dipakai ulang oleh user baru; AUTOINCREMENT mencatat id tertinggi di
+-- `sqlite_sequence` sehingga id tidak pernah dipakai ulang (sesi/audit lama tidak dapat menunjuk
+-- akun lain). Selain itu DDL identik secara semantik dengan draft. Catatan verifikasi:
 --   * `date(x) IS x` menolak tanggal non-kalender (2024-02-30 dinormalisasi menjadi 2024-03-01,
 --     sehingga tidak sama) dan format non-ISO (date() mengembalikan NULL).
 --   * `[^...]` pada GLOB adalah negasi kelas karakter di SQLite; `-` di akhir kelas adalah literal.
@@ -15,7 +18,7 @@
 -- File ini tidak boleh berisi BEGIN/COMMIT: D1 menolak transaksi eksplisit.
 
 CREATE TABLE users (
-  id              INTEGER PRIMARY KEY,
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
   username        TEXT    NOT NULL COLLATE NOCASE
                   CHECK (length(username) BETWEEN 1 AND 100 AND username = trim(username)),
   password_hash   TEXT    NOT NULL

@@ -47,7 +47,15 @@ const encoder = new TextEncoder();
 
 // ─── Primitif crypto ────────────────────────────────────────────────────────
 
-/** SHA-256 heksadesimal lowercase dari string UTF-8 (sama dengan `sha256Hex_` Code.js). */
+/**
+ * SHA-256 heksadesimal lowercase dari string UTF-8 (sama dengan `sha256Hex_` Code.js).
+ *
+ * Catatan (tanpa perubahan perilaku): string dengan surrogate UTF-16 tak berpasangan (lone surrogate)
+ * di-encode TextEncoder menjadi U+FFFD (EF BF BD), sedangkan `Utilities.computeDigest` GAS (encoder
+ * Java) memakai byte pengganti lain. Password seperti itu menghasilkan hash berbeda antara GAS dan
+ * Workers, sehingga selama jendela rollback akun dengan password tersebut tidak dapat login lintas
+ * backend. Password dari form normal (input teks browser) tidak mengandung lone surrogate.
+ */
 export async function sha256Hex(text) {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(text)));
   return bytesToHex(new Uint8Array(digest));
@@ -231,7 +239,9 @@ export async function revokeSession(db, token, now = new Date()) {
 
 /**
  * Login. Gagal karena username tidak dikenal, password salah, throttle, atau error D1 saat throttle
- * selalu melempar INVALID_CREDENTIALS dengan pesan sama (tanpa enumerasi akun).
+ * selalu melempar INVALID_CREDENTIALS dengan pesan sama (tanpa enumerasi akun), dan selalu menjalankan
+ * satu derivasi password (biaya waktu setara). PASSWORD_PEPPER kosong → CONFIG_ERROR untuk setiap
+ * percobaan, sebelum query apa pun.
  * @param {object} db
  * @param {object} env `PASSWORD_PEPPER`, `PASSWORD_HASH_ALGO`, `PBKDF2_ITERATIONS`, `PASSWORD_REHASH_ON_LOGIN`
  * @param {{ username?: unknown, password?: unknown }} credentials
@@ -243,6 +253,10 @@ export async function login(db, env, credentials, now = new Date()) {
   const username = cleanText(credentials?.username, 100);
   const password = String(credentials?.password || '');
   if (!username || !password) throw invalidCredentials();
+  // Konfigurasi dicek sebelum lookup user dan konsumsi throttle: pepper kosong → CONFIG_ERROR untuk
+  // SETIAP percobaan (akun dikenal maupun tidak), sehingga kode status tidak membocorkan keberadaan akun.
+  if (!env?.PASSWORD_PEPPER) throw appError('CONFIG_ERROR', AUTH_MESSAGES.PEPPER_MISSING_VERIFY);
+  passwordHashAlgo(env); // PASSWORD_HASH_ALGO tidak dikenal → CONFIG_ERROR, juga untuk semua percobaan
   const nowMs = toMillis(now);
 
   let user;
@@ -256,6 +270,7 @@ export async function login(db, env, credentials, now = new Date()) {
   } catch (lookupError) {
     // Seperti Code.js: tetap konsumsi bucket bersama (fail-closed) sebelum melaporkan error.
     if (!(await consumeLoginAttempt(db, await throttleKey(UNKNOWN_USERNAME_BUCKET), nowMs))) {
+      await verifyPassword(password, dummyHash(env), env); // biaya setara jalur gagal; hasil diabaikan
       throw invalidCredentials();
     }
     throw fromD1Error(lookupError);
@@ -263,15 +278,17 @@ export async function login(db, env, credentials, now = new Date()) {
 
   // Key dari username kanonik tersimpan, tidak pernah dari input mentah (Bagian 4.1).
   const key = await throttleKey(user ? String(user.username).toLowerCase() : UNKNOWN_USERNAME_BUCKET);
-  if (!(await consumeLoginAttempt(db, key, nowMs))) throw invalidCredentials();
+  const allowed = await consumeLoginAttempt(db, key, nowMs);
 
+  // Derivasi password SELALU dijalankan tepat sekali (juga saat throttle menolak) agar waktu respons
+  // percobaan ter-throttle, username tidak dikenal, dan password salah tidak dapat dibedakan.
   let valid = false;
   if (user) {
     valid = await verifyPassword(password, user.password_hash, env);
   } else {
     await verifyPassword(password, dummyHash(env), env); // biaya setara; hasil diabaikan
   }
-  if (!valid) throw invalidCredentials();
+  if (!allowed || !valid) throw invalidCredentials();
 
   const nowText = nowIso(nowMs);
   const session = await prepareSession(db, user, nowMs);

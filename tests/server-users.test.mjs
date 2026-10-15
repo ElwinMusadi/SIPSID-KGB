@@ -286,6 +286,34 @@ test('updateUser: perubahan role menaikkan session_version sehingga sesi user ta
   await assert.rejects(requireSession(db, newAdminToken), err('AUTH_REQUIRED', MSG.sessionStale));
 });
 
+test('updateUser: promosi pengelola → admin menaikkan session_version dan membatalkan SEMUA sesi target', async () => {
+  const { db, admin, adminToken } = await setup();
+  const { token: tokenA } = await loginAs(db, 2);
+  const { token: tokenB } = await loginAs(db, 2);
+  const { token: otherToken } = await loginAs(db, 3);
+  assert.equal(row(db, 2).session_version, 1);
+
+  const { proxy, counter } = counting(db);
+  const result = await updateUser(proxy, ENV, admin, 'peng1', { namaLengkap: 'Pengelola Satu', hakAkses: 'admin' });
+  assert.equal(counter.count, 1);
+  assert.deepEqual(result, { status: 'success', data: { username: 'peng1', namaLengkap: 'Pengelola Satu', hakAkses: 'admin' } });
+  assert.equal(row(db, 2).role, 'admin');
+  assert.equal(row(db, 2).session_version, 2);
+
+  // Sesi lama target tidak boleh naik menjadi admin: basi untuk akses biasa maupun admin.
+  for (const token of [tokenA, tokenB]) {
+    await assert.rejects(requireSession(db, token), err('AUTH_REQUIRED', MSG.sessionStale));
+    await assert.rejects(requireSession(db, token, { admin: true }), err('AUTH_REQUIRED', MSG.sessionStale));
+  }
+  // Sesi user lain dan sesi actor tidak terpengaruh.
+  assert.equal((await requireSession(db, otherToken)).username, LEGACY);
+  assert.equal((await requireSession(db, adminToken, { admin: true })).username, 'admin1');
+  // Login ulang menghasilkan sesi admin yang valid.
+  const { session } = await loginAs(db, 2, { admin: true });
+  assert.equal(session.hakAkses, 'admin');
+  assert.equal(session.sessionVersion, 2);
+});
+
 test('updateUser: target username lama dengan spasi diterima; validasi dan NOT_FOUND identik Code.js', async () => {
   const { db, admin } = await setup();
   const ok = await updateUser(db, ENV, admin, ` ${LEGACY.toLowerCase()} `, { namaLengkap: 'Lama', hakAkses: 'pengelola' });
