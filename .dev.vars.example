@@ -1,3 +1,13 @@
-GAS_WEB_APP_URL=https://script.google.com/macros/s/AKfycbzNF8f76oKQXQqJjZGzqgrmoRjqOisma7mhmzaDp9jkLujDZF40cQ96C5VuIlQ9IhOZ1Q/exec
-CLOUDFLARE_API_SECRET=replace-with-the-same-random-secret-as-gas-script-properties
-ALLOWED_ORIGIN=http://localhost:8788
+# Salin ke .dev.vars untuk `wrangler pages dev`. Jangan pernah mengisi nilai produksi di file contoh ini.
+
+# Pepper hash password (wajib). Di produksi: Pages secret, sama dengan Script Property GAS.
+PASSWORD_PEPPER=
+
+# "true" menolak seluruh mutasi /api/* dengan 503 maintenance. Di produksi: Pages secret.
+MAINTENANCE_MODE=false
+
+# Opsional: origin yang diizinkan untuk mutasi; kosong = origin request.
+ALLOWED_ORIGIN=
+
+# Algoritme hash password baru: sha256 (plan Free) atau pbkdf2_sha256.
+PASSWORD_HASH_ALGO=sha256

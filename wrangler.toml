@@ -1,3 +1,20 @@
 name = "sipsid-kgb"
 compatibility_date = "2026-09-16"
 pages_build_output_dir = "dist"
+
+# PASSWORD_PEPPER dan MAINTENANCE_MODE adalah Pages secrets (wrangler pages secret put ...),
+# bukan [vars]: jangan tambahkan keduanya ke file ini. Perubahan secret baru berlaku setelah
+# deployment baru (MIGRATION_PLAN.md Fase 1 langkah 5, Bagian 11.2).
+# Migrasi D1 dijalankan manual (K7); build Pages tidak menjalankan migrasi.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sipsid-kgb"
+database_id = "ccc9fdf8-8668-4ebe-afad-5fa8d4e71913"
+migrations_dir = "migrations"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "sipsid-kgb-preview"
+database_id = "3185cc3a-81a5-49eb-afd2-6b039ad387f8"
+migrations_dir = "migrations"

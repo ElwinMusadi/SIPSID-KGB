@@ -1,19 +1,16 @@
+// Gateway /api/* (Cloudflare Pages Functions).
+//
+// Routing, cookie sesi, validasi origin, batas payload, envelope `{ ok, data, error }`, dan pemetaan
+// status HTTP dipertahankan dari gateway GAS. Sejak Fase 1 (MIGRATION_PLAN.md Bagian 3, 6) setiap
+// action dijalankan in-process oleh `src/server/dispatch.js` terhadap binding D1 `env.DB`; tidak ada
+// lagi fetch ke GAS, timeout upstream, retry, atau secret GAS.
+
+import { BACKEND_VERSION, dispatch } from "../../src/server/dispatch.js";
+
 const MAX_PAYLOAD_BYTES = 64 * 1024;
-const UPSTREAM_TIMEOUT_MS = 28_000;
-const RETRY_BACKOFF_MS = 200;
 const DEFAULT_SESSION_MAX_AGE = 8 * 60 * 60;
 const SESSION_COOKIE = "sipsid_session";
-
-// Actions that are safe to retry once on network abort / upstream 502-504.
-// Login is intentionally excluded: each attempt consumes a throttle slot on GAS.
-// Mutations (create, update, delete) must never be retried.
-const RETRYABLE_ACTIONS = new Set([
-  "bootstrap.get",
-  "letters.list",
-  "users.list",
-  "auth.session",
-  "system.manifest",
-]);
+const GENERIC_ERROR_MESSAGE = "Layanan sedang mengalami kendala. Silakan coba kembali.";
 
 const ROUTES = new Map([
   ["POST /api/auth/login", { action: "auth.login", body: true, mutation: true }],
@@ -120,17 +117,6 @@ export function clearSessionCookie() {
   return `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
 }
 
-export function validateConfig(env) {
-  if (!env?.GAS_WEB_APP_URL || !env?.CLOUDFLARE_API_SECRET) return null;
-  try {
-    const url = new URL(env.GAS_WEB_APP_URL);
-    if (url.protocol !== "https:") return null;
-    return { gasUrl: url.toString(), apiSecret: String(env.CLOUDFLARE_API_SECRET) };
-  } catch {
-    return null;
-  }
-}
-
 export function isAllowedOrigin(request, allowedOrigin) {
   const origin = request.headers.get("Origin");
   if (!origin) return false;
@@ -189,28 +175,30 @@ function sanitizeClientValue(value) {
   if (!value || typeof value !== "object") return value;
   const sanitized = {};
   for (const [key, item] of Object.entries(value)) {
-    // Strip known sensitive field names recursively at any depth.
-    // "hash" and "passwordHash" are added alongside "password" so that
-    // a GAS bug accidentally including the stored password/hash field in
-    // users.list data cannot leak it to the browser.
-    if (/^(?:apiSecret|secret|sessionToken|token|password|passwordHash|hash|stack)$/i.test(key)) continue;
+    // Strip known sensitive field names recursively at any depth, so a backend bug
+    // that includes a stored password/hash/token can never leak it to the browser.
+    if (/^(?:apiSecret|secret|sessionToken|token|password|passwordHash|password_hash|hash|stack)$/i.test(key)) continue;
     sanitized[key] = sanitizeClientValue(item);
   }
   return sanitized;
 }
 
-export function normalizeGasResponse(value) {
+/**
+ * Mengubah hasil berbentuk GAS dari `dispatch` menjadi envelope `{ ok, data, error }`.
+ * `backendVersion` (BACKEND_VERSION) selalu ada di root envelope; `idempotent: true` diteruskan di root.
+ */
+export function normalizeResponse(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, data: null, error: { code: "upstream_invalid_response", message: "Respons layanan tidak valid." } };
+    return {
+      ok: false,
+      data: null,
+      error: { code: "upstream_invalid_response", message: "Respons layanan tidak valid." },
+      backendVersion: BACKEND_VERSION,
+    };
   }
 
-  // Ekstrak gasBackendVersion dari root GAS response untuk disertakan di envelope.
-  // Ini memungkinkan log Cloudflare mendeteksi mismatch antara versi deployment GAS
-  // yang berjalan dengan versi source yang diharapkan, tanpa mengkontaminasi data.
-  const gasBackendVersion = typeof value.gasBackendVersion === "string" ? value.gasBackendVersion : undefined;
-
-  // idempotent: true is set by GAS when a letters.create with requestId finds an existing row.
-  // Pass it through the envelope so the client agent can distinguish first-create from replay.
+  // idempotent: true is set by letters.create when a requestId replay finds the existing row.
+  // Pass it through the envelope so the client can distinguish first-create from replay.
   const idempotent = value.idempotent === true ? true : undefined;
 
   const failed = value.ok === false || (typeof value.status === "string" && value.status.toLowerCase() !== "success");
@@ -230,14 +218,11 @@ export function normalizeGasResponse(value) {
         : typeof value.message === "string"
           ? value.message
           : "Permintaan gagal.";
-    const result = { ok: false, data: null, error: { code, message } };
-    if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
-    return result;
+    return { ok: false, data: null, error: { code, message }, backendVersion: BACKEND_VERSION };
   }
 
   if (Object.hasOwn(value, "data")) {
-    const result = { ok: true, data: sanitizeClientValue(value.data), error: null };
-    if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+    const result = { ok: true, data: sanitizeClientValue(value.data), error: null, backendVersion: BACKEND_VERSION };
     if (idempotent !== undefined) result.idempotent = idempotent;
     return result;
   }
@@ -247,46 +232,48 @@ export function normalizeGasResponse(value) {
   delete data.error;
   delete data.errorMsg;
   delete data.gasBackendVersion;
+  delete data.backendVersion;
   delete data.idempotent;
-  const result = { ok: true, data: sanitizeClientValue(data), error: null };
-  if (gasBackendVersion !== undefined) result.gasBackendVersion = gasBackendVersion;
+  const result = { ok: true, data: sanitizeClientValue(data), error: null, backendVersion: BACKEND_VERSION };
   if (idempotent !== undefined) result.idempotent = idempotent;
   return result;
 }
 
-function extractSession(upstream) {
+/** @deprecated Alias transisi; gunakan `normalizeResponse`. Dihapus pada Fase 6. */
+export const normalizeGasResponse = normalizeResponse;
+
+function extractSession(result) {
   const candidates = [
-    upstream.sessionToken,
-    upstream.token,
-    upstream.data?.sessionToken,
-    upstream.data?.token,
+    result.sessionToken,
+    result.token,
+    result.data?.sessionToken,
+    result.data?.token,
   ];
   const token = candidates.find((value) => typeof value === "string" && value.length > 0);
-  const maxAge = upstream.maxAge ?? upstream.expiresIn ?? upstream.data?.maxAge ?? upstream.data?.expiresIn;
+  const maxAge = result.maxAge ?? result.expiresIn ?? result.data?.maxAge ?? result.data?.expiresIn;
   return { token, maxAge };
 }
 
-function upstreamStatus(normalized, responseStatus) {
+/** Status HTTP untuk envelope hasil `normalizeResponse`. */
+export function statusForEnvelope(normalized) {
   if (normalized.ok) return 200;
-  if (responseStatus >= 400 && responseStatus < 500) return responseStatus;
-  const code = normalized.error?.code;
-  const normalizedCode = String(code || "").toLowerCase();
+  const normalizedCode = String(normalized.error?.code || "").toLowerCase();
   if (normalizedCode === "unauthorized" || normalizedCode === "auth_required" || normalizedCode === "invalid_session" || normalizedCode === "session_expired") return 401;
   if (normalizedCode === "forbidden" || normalizedCode === "unauthorized_gateway") return 403;
-  // Spreadsheet permission/protection rejected the write (GAS v2.5.2+).
+  // Kept for contract compatibility; practically unused on D1 (MIGRATION_PLAN.md 6.2).
   if (normalizedCode === "data_write_denied" || normalizedCode === "write_forbidden") return 403;
-  if (normalizedCode === "not_found") return 404;
-  if (normalizedCode === "duplicate_user") return 409;
+  // Unknown action: only reachable if ROUTES and dispatch diverge. Same status as an unknown route.
+  if (normalizedCode === "not_found" || normalizedCode === "action_not_found") return 404;
+  if (normalizedCode === "duplicate_user" || normalizedCode === "version_conflict") return 409;
   if (normalizedCode === "validation_error" || normalizedCode === "invalid_credentials" || normalizedCode === "bad_request") return 400;
   if (normalizedCode === "last_admin_protected" || normalizedCode === "data_validation_error") return 422;
   if (normalizedCode === "too_many_attempts") return 429;
-  // Lock contention or transient Spreadsheet outage. Mutations are still never
-  // retried by the gateway (see RETRYABLE_ACTIONS): the outcome may be committed.
+  // Transient D1 outage. Mutations are never retried: the outcome may be committed.
   if (normalizedCode === "busy" || normalizedCode === "data_service_unavailable") return 503;
-  // Write freeze (GAS v2.5.4+ MAINTENANCE_MODE): mutation rejected before any
-  // write. Session stays valid, so the cookie is kept; mutations not retried.
+  // Write freeze (MAINTENANCE_MODE): mutation rejected before any DB access.
+  // Session stays valid, so the cookie is kept.
   if (normalizedCode === "maintenance") return 503;
-  // data_write_failed and any unclassified upstream failure.
+  // data_write_failed, internal_error, config_error, and any unclassified failure.
   return 502;
 }
 
@@ -296,14 +283,16 @@ function isSessionInvalidCode(code) {
   return c === "auth_required" || c === "session_expired" || c === "invalid_session";
 }
 
-export async function handleRequest(context, fetchImpl = fetch) {
+export async function handleRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
   const route = mapRoute(request.method, url.pathname);
   if (!route) return errorResponse(404, "not_found", "Route tidak ditemukan.");
 
-  const config = validateConfig(env);
-  if (!config) return errorResponse(500, "server_misconfigured", "Konfigurasi layanan tidak tersedia.");
+  const db = env?.DB;
+  if (!db || typeof db.prepare !== "function") {
+    return errorResponse(500, "server_misconfigured", "Konfigurasi layanan tidak tersedia.");
+  }
 
   if (route.mutation && !isAllowedOrigin(request, env.ALLOWED_ORIGIN)) {
     return errorResponse(403, "origin_forbidden", "Origin tidak diizinkan.");
@@ -326,62 +315,23 @@ export async function handleRequest(context, fetchImpl = fetch) {
   }
 
   const sessionToken = parseCookies(request.headers.get("Cookie"))[SESSION_COOKIE] || "";
-  const gasBody = JSON.stringify({
-    action: route.action,
-    payload,
-    sessionToken,
-    apiSecret: config.apiSecret,
-  });
 
-  const canRetry = RETRYABLE_ACTIONS.has(route.action);
-  let upstreamResponse;
-  let lastFetchError;
-
-  for (let attempt = 0; attempt <= (canRetry ? 1 : 0); attempt++) {
-    if (attempt > 0) {
-      // Small backoff before retry to avoid hammering a recovering GAS instance.
-      await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
-    }
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-    try {
-      upstreamResponse = await fetchImpl(config.gasUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: gasBody,
-        redirect: "follow",
-        signal: controller.signal,
-      });
-      lastFetchError = null;
-      // Retry on upstream 502/503/504 for safe actions only.
-      if (canRetry && attempt === 0 && (upstreamResponse.status === 502 || upstreamResponse.status === 503 || upstreamResponse.status === 504)) {
-        lastFetchError = new Error(`upstream ${upstreamResponse.status}`);
-        continue;
-      }
-      break;
-    } catch (err) {
-      lastFetchError = err;
-      upstreamResponse = null;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  if (!upstreamResponse) {
-    return errorResponse(504, "upstream_unavailable", "Layanan tidak dapat dihubungi.");
-  }
-
-  let upstream;
+  let result;
   try {
-    upstream = await upstreamResponse.json();
+    result = await dispatch(route.action, { db, env, payload, sessionToken });
   } catch {
-    return errorResponse(502, "upstream_invalid_response", "Respons layanan tidak valid.");
+    // dispatch never throws by contract; this is a last-resort guard without exception text.
+    console.error("SIPSID API error", { action: route.action, code: "INTERNAL_ERROR" });
+    return jsonResponse(
+      { ok: false, data: null, error: { code: "internal_error", message: GENERIC_ERROR_MESSAGE }, backendVersion: BACKEND_VERSION },
+      502,
+    );
   }
 
-  const normalized = normalizeGasResponse(upstream);
+  const normalized = normalizeResponse(result);
   const headers = {};
   if (route.action === "auth.login" && normalized.ok) {
-    const session = extractSession(upstream);
+    const session = extractSession(result);
     if (!session.token) return errorResponse(502, "upstream_invalid_response", "Respons login tidak valid.");
     headers["Set-Cookie"] = createSessionCookie(session.token, session.maxAge);
     if (normalized.data && typeof normalized.data === "object") {
@@ -393,15 +343,12 @@ export async function handleRequest(context, fetchImpl = fetch) {
     }
   } else if (route.action === "auth.logout") {
     headers["Set-Cookie"] = clearSessionCookie();
-  } else if (route.action === "auth.session" && !normalized.ok && isSessionInvalidCode(normalized.error?.code)) {
-    // Invalid session on session restore: clear cookie so browser stops sending it.
-    headers["Set-Cookie"] = clearSessionCookie();
   } else if (!normalized.ok && isSessionInvalidCode(normalized.error?.code)) {
     // Clear the stale session cookie so the browser does not keep sending it.
     headers["Set-Cookie"] = clearSessionCookie();
   }
 
-  return jsonResponse(normalized, upstreamStatus(normalized, upstreamResponse.status), headers);
+  return jsonResponse(normalized, statusForEnvelope(normalized), headers);
 }
 
 export function onRequest(context) {
