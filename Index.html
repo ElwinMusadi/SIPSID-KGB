@@ -151,13 +151,13 @@
             class="w-24 h-24 mx-auto mb-4 flex items-center justify-center drop-shadow-md bg-white rounded-full p-2"
           >
             <img
-              src="https://lh3.googleusercontent.com/d/1pRlJIuLpn3YnR8Dp-fIIDXt9-IX2sXd3"
+              src="/assets/logo-sipsid-kgb.png"
               alt="Logo SIPSID-KGB"
               class="w-full h-full object-contain"
               onerror="
                 this.onerror = null;
                 this.src =
-                  'https://placehold.co/100x100/1e3a8a/ffffff?text=NTT';
+                  '/assets/logo-fallback.svg';
               "
             />
           </div>
@@ -254,13 +254,13 @@
           <div class="flex items-center space-x-3">
             <div class="w-9 h-9 flex items-center justify-center">
               <img
-                src="https://lh3.googleusercontent.com/d/1pRlJIuLpn3YnR8Dp-fIIDXt9-IX2sXd3"
+                src="/assets/logo-sipsid-kgb.png"
                 alt="Logo"
                 class="w-full h-full object-contain"
                 onerror="
                   this.onerror = null;
                   this.src =
-                    'https://placehold.co/100x100/1e3a8a/ffffff?text=NTT';
+                    '/assets/logo-fallback.svg';
                 "
               />
             </div>
@@ -937,8 +937,8 @@
                   Arsip Pembuatan Surat KGB
                 </h2>
                 <p class="text-xs text-gray-500 mt-1">
-                  Riwayat seluruh surat Kenaikan Gaji Berkala dari Spreadsheet
-                  Database_Surat.
+                  Riwayat seluruh surat Kenaikan Gaji Berkala yang tersimpan
+                  dalam basis data.
                 </p>
               </div>
               <div class="w-full sm:w-80 relative">
@@ -1312,49 +1312,13 @@
     </div>
 
     <script>
-      // Data ini diisi oleh HtmlService pada target GAS dan diganti build script pada target Pages.
-      const INITIAL_SERVER_DATA = <?!= serverData ?>;
-      const serverData = INITIAL_SERVER_DATA || { status: 'success', gajiPNS: [], gajiPPPK: [] };
-      let masterGajiPNS = Array.isArray(serverData.gajiPNS) ? serverData.gajiPNS : [];
-      let masterGajiPPPK = Array.isArray(serverData.gajiPPPK) ? serverData.gajiPPPK : [];
-      let masterGajiError = serverData.status === 'error' ? serverData.errorMsg : '';
+      let masterGajiPNS = [];
+      let masterGajiPPPK = [];
+      let masterGajiError = '';
 
-      function isGasRuntime() {
-          return typeof google !== 'undefined' && google.script && google.script.run;
-      }
-
-      const SESSION_STORAGE_KEY = 'sipsid_session';
+      // Sesi dikelola server melalui cookie HttpOnly; storage hanya untuk idempotency surat.
       const PENDING_LETTER_CREATE_KEY = 'sipsid_pending_letter_create';
       let pendingLetterRequestMemory = null;
-
-      function getStoredSessionToken() {
-          let token = '';
-          try {
-              token = localStorage.getItem(SESSION_STORAGE_KEY) || '';
-              if (!token) {
-                  token = sessionStorage.getItem(SESSION_STORAGE_KEY) || '';
-                  if (token) localStorage.setItem(SESSION_STORAGE_KEY, token);
-              }
-              sessionStorage.removeItem(SESSION_STORAGE_KEY);
-          } catch (error) {
-              console.warn('Penyimpanan sesi browser tidak tersedia:', error);
-          }
-          return token;
-      }
-
-      function storeSessionToken(token) {
-          try {
-              if (token) localStorage.setItem(SESSION_STORAGE_KEY, token);
-              sessionStorage.removeItem(SESSION_STORAGE_KEY);
-          } catch (error) {
-              console.warn('Sesi tidak dapat disimpan di browser:', error);
-          }
-      }
-
-      function clearStoredSessionToken() {
-          try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (error) {}
-          try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (error) {}
-      }
 
       function createRequestId() {
           if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -1429,28 +1393,12 @@
           return /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
       }
 
-      // Backend GAS menyematkan "(Kode: <CODE>)" atau "(Kode: <CODE>; Ref: <REF>)" di akhir pesan error karena
-      // google.script.run hanya meneruskan message, bukan error.code. Parser ini memulihkan kode (dan ref bila ada)
-      // untuk kegagalan message-only tanpa membawa token/payload.
-      const EMBEDDED_ERROR_MARKER = /\s*\(Kode:\s*([A-Za-z0-9_]+)(?:;\s*Ref:\s*([A-Za-z0-9._:-]+))?\)\s*$/;
-
-      function parseEmbeddedErrorMarker(message) {
-          const text = typeof message === 'string' ? message.trim() : '';
-          const match = text.match(EMBEDDED_ERROR_MARKER);
-          if (!match) return { message: text, code: '', ref: '' };
-          return {
-              message: text.slice(0, match.index).trim(),
-              code: sanitizeErrorCode(match[1]),
-              ref: sanitizeCorrelationRef(match[2])
-          };
-      }
-
-      // Kode error dari envelope (code/errorCode/error.code), status 'not_found' lama, atau marker tersemat di message.
+      // Kode hanya berasal dari metadata API, tidak disimpulkan dari teks pesan.
       function normalizeApiErrorCode(value) {
-          const explicit = sanitizeErrorCode(String(value?.code || value?.errorCode || value?.error?.code || ''));
+          const explicit = sanitizeErrorCode(value?.code || value?.error?.code);
           if (explicit) return explicit;
           if (typeof value?.status === 'string' && value.status.trim().toLowerCase() === 'not_found') return 'NOT_FOUND';
-          return parseEmbeddedErrorMarker(value?.message || value?.errorMsg || value?.error?.message).code;
+          return '';
       }
 
       function getApiErrorCode(value, httpStatus = 0) {
@@ -1466,21 +1414,6 @@
           if (!isSessionError(value, httpStatus)) return false;
           expireClientSession();
           return true;
-      }
-
-      function runGas(method, ...args) {
-          return new Promise((resolve, reject) => {
-              let runner = google.script.run
-                  .withSuccessHandler(result => {
-                      if (!['apiLogin', 'apiLogout', 'apiGetSession'].includes(method)) handleSessionError(result);
-                      resolve(result);
-                  })
-                  .withFailureHandler(error => {
-                      if (!['apiLogin', 'apiLogout', 'apiGetSession'].includes(method)) handleSessionError(error);
-                      reject(error);
-                  });
-              runner[method](...args);
-          });
       }
 
       async function fetchJson(url, options = {}) {
@@ -1513,25 +1446,24 @@
           return result.ok === true ? result.data : result;
       }
 
-      // Ref GAS (dari envelope atau marker) dan ref gateway (header cf-ray) dibedakan agar operator tahu log mana yang dicari.
+      // Ref layanan dan ref gateway (header cf-ray) dibedakan untuk penelusuran log.
       function getApiErrorRef(value) {
-          return sanitizeCorrelationRef(value?.ref) || parseEmbeddedErrorMarker(value?.message).ref;
+          return sanitizeCorrelationRef(value?.ref);
       }
 
       function getGatewayErrorRef(value) {
           return sanitizeCorrelationRef(value?.gatewayRef);
       }
 
-      // Membangun Error dari envelope respons backend (GAS `{status:'error'|'not_found', errorCode?, errorMsg, gasBackendVersion}`
-      // atau Pages `{ok:false, error:{code, message}, gasBackendVersion}`) tanpa membawa token/payload.
+      // Membangun Error dari envelope API tanpa membawa token atau payload.
       function createApiError(result, fallbackMessage, fallbackCode = '') {
           const error = new Error(result?.error?.message || result?.errorMsg || fallbackMessage);
           error.code = normalizeApiErrorCode(result) || fallbackCode;
-          const backendVersion = sanitizeBackendVersion(result?.gasBackendVersion ?? result?.backendVersion);
+          const backendVersion = sanitizeBackendVersion(result?.backendVersion);
           if (backendVersion) error.backendVersion = backendVersion;
           const ref = sanitizeCorrelationRef(
               result?.error?.ref ?? result?.error?.correlationId ?? result?.ref ?? result?.correlationId
-          ) || parseEmbeddedErrorMarker(error.message).ref;
+          );
           if (ref) error.ref = ref;
           return error;
       }
@@ -1544,7 +1476,7 @@
       ]);
       // Backend menjamin tidak ada baris tertulis: cukup ulangi setelah proses lain selesai.
       const BUSY_SAVE_CODES = new Set(['BUSY', 'LOCK_TIMEOUT', 'LOCK_BUSY', 'TOO_MANY_REQUESTS', 'HTTP_429', 'HTTP_423']);
-      // Kode yang pesannya sudah disaring backend (publicErrorMessage_ / Pages) sehingga aman ditampilkan apa adanya.
+      // Kode yang pesannya sudah disaring API sehingga aman ditampilkan apa adanya.
       const SAFE_BACKEND_MESSAGE_CODES = new Set([
           'DATA_WRITE_DENIED', 'WRITE_DENIED', 'PERMISSION_DENIED', 'PROTECTED_RANGE', 'FORBIDDEN',
           'DATA_VALIDATION_ERROR', 'VALIDATION_ERROR', 'BAD_REQUEST', 'INVALID_JSON', 'UNSUPPORTED_MEDIA_TYPE',
@@ -1553,12 +1485,12 @@
           'INVALID_SESSION', 'HTTP_401', 'UNAUTHORIZED_GATEWAY', 'LOCAL_STATE_MISMATCH'
       ]);
       const SAFE_CODE_FALLBACK_MESSAGES = {
-          DATA_WRITE_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet (proteksi sheet/range atau hak akses). Hubungi administrator; mengulang tidak akan memperbaikinya.',
-          WRITE_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet (proteksi sheet/range atau hak akses). Hubungi administrator; mengulang tidak akan memperbaikinya.',
-          PERMISSION_DENIED: 'Backend tidak memiliki izin menulis ke Spreadsheet. Hubungi administrator; mengulang tidak akan memperbaikinya.',
-          PROTECTED_RANGE: 'Sheet atau range tujuan terproteksi. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          DATA_WRITE_DENIED: 'Layanan tidak memiliki izin menulis ke basis data. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          WRITE_DENIED: 'Layanan tidak memiliki izin menulis ke basis data. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          PERMISSION_DENIED: 'Layanan tidak memiliki izin menulis ke basis data. Hubungi administrator; mengulang tidak akan memperbaikinya.',
+          PROTECTED_RANGE: 'Data tujuan dilindungi dari perubahan. Hubungi administrator; mengulang tidak akan memperbaikinya.',
           FORBIDDEN: 'Akun Anda tidak memiliki hak untuk tindakan ini.',
-          DATA_VALIDATION_ERROR: 'Data ditolak oleh aturan validasi Spreadsheet. Periksa kembali isian lalu simpan ulang.',
+          DATA_VALIDATION_ERROR: 'Data ditolak oleh aturan validasi basis data. Periksa kembali isian lalu simpan ulang.',
           VALIDATION_ERROR: 'Data formulir tidak valid. Periksa kembali isian lalu simpan ulang.',
           NOT_FOUND: 'Data yang dituju tidak ditemukan di server.'
       };
@@ -1577,8 +1509,7 @@
           return parts.length ? ` [${parts.join(', ')}]` : '';
       }
 
-      // Write freeze backend (Script Property MAINTENANCE_MODE). Penolakan pasti: backend menolak sebelum lock
-      // dan sebelum menyentuh sheet, jadi tidak ada data yang ditulis. Bukan error sesi.
+      // Pemeliharaan menolak mutasi sebelum penulisan basis data. Bukan error sesi.
       const MAINTENANCE_FALLBACK_MESSAGE = 'Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.';
 
       function isMaintenanceError(error) {
@@ -1588,7 +1519,7 @@
       function getMaintenanceErrorMessage(error) {
           const rawMessage = typeof error?.message === 'string' ? error.message
               : typeof error?.errorMsg === 'string' ? error.errorMsg : '';
-          const message = parseEmbeddedErrorMarker(rawMessage.trim()).message;
+          const message = rawMessage.trim();
           return `${message || MAINTENANCE_FALLBACK_MESSAGE}${describeSubmitErrorDiagnostics(error)}`;
       }
 
@@ -1599,16 +1530,15 @@
       }
 
       function getSubmitErrorMessage(error, isEditing) {
-          const fallback = `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`;
+          const fallback = `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di basis data.`;
           const rawMessage = typeof error?.message === 'string' ? error.message.trim() : '';
-          const message = parseEmbeddedErrorMarker(rawMessage).message;
+          const message = rawMessage;
           const code = normalizeApiErrorCode(error);
           const diagnostics = describeSubmitErrorDiagnostics(error);
 
           if (code === 'MAINTENANCE') return getMaintenanceErrorMessage(error);
 
-          const isApiVersionMismatch = code === 'ACTION_NOT_FOUND' ||
-              /Aksi API tidak dikenal|Script function not found:\s*apiUpdateLetter/i.test(rawMessage);
+          const isApiVersionMismatch = code === 'ACTION_NOT_FOUND';
           if (isEditing && isApiVersionMismatch) {
               const detail = message ? ` Detail layanan: ${message}` : '';
               return `Versi backend yang aktif belum mendukung pembaruan arsip. Deployment frontend dan backend belum sinkron.${detail}`;
@@ -1629,8 +1559,8 @@
               return `${message || SAFE_CODE_FALLBACK_MESSAGES[code] || fallback}${diagnostics}`;
           }
 
-          // INTERNAL_ERROR, DATA_WRITE_FAILED, HTTP 5xx, kegagalan upstream, atau error tanpa kode (mis. failure handler
-          // google.script.run). Pesan mentah tidak ditampilkan karena bisa berisi detail internal.
+          // INTERNAL_ERROR, DATA_WRITE_FAILED, HTTP 5xx, atau error tanpa kode: pesan mentah
+          // tidak ditampilkan karena bisa berisi detail internal.
           const unverified = UNVERIFIED_SAVE_CODES.has(code) || /^HTTP_5\d\d$/.test(code) || !code;
           if (unverified) {
               // Create: requestId tertunda dipertahankan sehingga pengiriman ulang data sama dikenali backend (tidak duplikat).
@@ -1646,73 +1576,47 @@
 
       const api = {
           async login(credentials) {
-              if (isGasRuntime()) {
-                  const result = await runGas('apiLogin', credentials);
-                  if (!result || result.status !== 'success') throw new Error(result?.errorMsg || 'Login gagal.');
-                   storeSessionToken(result.sessionToken);
-                   return result;
-              }
               const data = await fetchJson('/api/auth/login', { method: 'POST', body: JSON.stringify(credentials), skipSessionExpiry: true });
               return { status: 'success', ...data };
           },
           async logout() {
-              if (isGasRuntime()) {
-                  const token = getStoredSessionToken();
-                  clearStoredSessionToken();
-                  return runGas('apiLogout');
-              }
               await fetchJson('/api/auth/logout', { method: 'POST', body: '{}', skipSessionExpiry: true });
               return { status: 'success' };
           },
           async getSession() {
-              if (isGasRuntime()) {
-                  const token = getStoredSessionToken();
-                  if (!token) return null;
-                  return runGas('apiGetSession', token);
-              }
               const data = await fetchJson('/api/auth/session', { skipSessionExpiry: true });
               return { status: 'success', ...data };
           },
           async getBootstrap() {
-              if (isGasRuntime()) return runGas('apiGetBootstrap');
               const data = await fetchJson('/api/bootstrap');
               return { status: 'success', ...data };
           },
           async listLetters() {
-              if (isGasRuntime()) return runGas('apiListLetters', getStoredSessionToken());
               return { status: 'success', data: await fetchJson('/api/letters') };
           },
           async createLetter(payload) {
-              if (isGasRuntime()) return runGas('apiCreateLetter', getStoredSessionToken(), payload);
               return { status: 'success', data: await fetchJson('/api/letters', { method: 'POST', body: JSON.stringify(payload) }) };
           },
           async updateLetter(id, payload) {
-              if (isGasRuntime()) return runGas('apiUpdateLetter', getStoredSessionToken(), id, payload);
               return { status: 'success', data: await fetchJson(`/api/letters/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }) };
           },
           async deleteLetter(id) {
-              if (isGasRuntime()) return runGas('apiDeleteLetter', getStoredSessionToken(), id);
               const data = await fetchJson(`/api/letters/${encodeURIComponent(id)}`, { method: 'DELETE', body: '{}' });
               return { status: 'success', ...data };
           },
           async listUsers() {
-              if (isGasRuntime()) return runGas('apiListUsers', getStoredSessionToken());
               return { status: 'success', data: await fetchJson('/api/users') };
           },
           async createUser(payload) {
-              if (isGasRuntime()) return runGas('apiCreateUser', getStoredSessionToken(), payload);
               return { status: 'success', data: await fetchJson('/api/users', { method: 'POST', body: JSON.stringify(payload) }) };
           },
           async updateUser(username, payload) {
-              if (isGasRuntime()) return runGas('apiUpdateUser', getStoredSessionToken(), username, payload);
               return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}`, { method: 'PUT', body: JSON.stringify(payload) }) };
           },
           async resetUserPassword(username, newPassword) {
-              if (isGasRuntime()) return runGas('apiResetUserPassword', getStoredSessionToken(), username, { newPassword });
               return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}/password`, { method: 'PUT', body: JSON.stringify({ newPassword }) }) };
           },
           async deleteUser(username) {
-              if (isGasRuntime()) return runGas('apiDeleteUser', getStoredSessionToken(), username);
               return { status: 'success', data: await fetchJson(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE', body: '{}' }) };
           }
       };
@@ -1736,10 +1640,10 @@
       let userDialogTrigger = null;
       let clientSessionExpiring = false;
 
-      // Desain Kop Surat berbasis Gambar (Memanggil langsung dari Google Drive)
+      // Kop surat resmi memakai aset lokal; kegagalan tidak diganti dengan gambar lain.
       const kopSuratHTML = `
           <div style="width: 100%; margin-bottom: 16px; text-align: center;">
-              <img src="https://lh3.googleusercontent.com/d/1japtuTk8FPjx7oUCdiBB1eC_q-7gThGH" style="width: 100%; height: auto;" alt="Kop Surat Dinas Pendidikan dan Kebudayaan Provinsi NTT" onerror="this.onerror=null; this.alt='Gambar Kop Surat gagal dimuat. Pastikan setelan file di Google Drive adalah Siapa saja yang memiliki link (Anyone with the link).';">
+              <img src="/assets/kop-surat-ntt.png" style="width: 100%; height: auto;" alt="Kop Surat Dinas Pendidikan dan Kebudayaan Provinsi NTT" onerror="this.onerror=null; this.alt='Kop surat resmi gagal dimuat. Muat ulang halaman; jika masalah berlanjut, hubungi administrator.';">
           </div>
       `;
 
@@ -1752,7 +1656,7 @@
           "Kabupaten Sumba Timur", "Kabupaten Timor Tengah Selatan", "Kabupaten Timor Tengah Utara", "Kota Kupang"
       ];
 
-      // Daftar ini hanya digunakan untuk label dropdown. Nominal gaji selalu berasal dari Master_Gaji_Pangkat.
+      // Daftar ini hanya digunakan untuk label dropdown. Nominal gaji selalu berasal dari master gaji.
       const pangkatPNS = [
           { label: "Juru Muda (I/a)" }, { label: "Juru Muda Tingkat I (I/b)" },
           { label: "Juru (I/c)" }, { label: "Juru Tingkat I (I/d)" },
@@ -1880,22 +1784,17 @@
             try {
               const result = await api.getBootstrap();
               if (!result || result.status !== 'success') {
-                  throw new Error(result?.errorMsg || 'Data Master_Gaji_Pangkat gagal dimuat.');
+                  throw new Error(result?.errorMsg || 'Data master gaji gagal dimuat.');
               }
               masterGajiPNS = Array.isArray(result.gajiPNS) ? result.gajiPNS : [];
               masterGajiPPPK = Array.isArray(result.gajiPPPK) ? result.gajiPPPK : [];
               masterGajiError = '';
             } catch (error) {
-              masterGajiError = error?.message || String(error || 'Data Master_Gaji_Pangkat gagal dimuat.');
+              masterGajiError = error?.message || String(error || 'Data master gaji gagal dimuat.');
             }
             if (!editingLetterId) calculateSalary();
           })().finally(() => { masterGajiPromise = null; });
           return masterGajiPromise;
-      }
-
-      function hasUsableInitialMasterGaji() {
-          return isGasRuntime() && !masterGajiError &&
-              (masterGajiPNS.length > 0 || masterGajiPPPK.length > 0);
       }
 
       function showAuthenticatedApplication(user) {
@@ -1913,14 +1812,12 @@
               const result = await api.getSession();
               const user = result?.user || result?.data?.user;
               if (!result || result.status === 'error' || !user) {
-                  clearStoredSessionToken();
                   return false;
               }
               showAuthenticatedApplication(user);
               navigate('dashboard');
               return true;
           } catch (error) {
-              clearStoredSessionToken();
               if (!isSessionError(error)) console.warn('Sesi tidak dapat dipulihkan:', error);
               return false;
           }
@@ -1928,10 +1825,6 @@
 
       async function initializeApplication() {
           await restoreSession();
-          if (hasUsableInitialMasterGaji()) {
-              if (!editingLetterId) calculateSalary();
-              return;
-          }
           await refreshMasterGaji();
       }
 
@@ -1952,7 +1845,7 @@
           const formattedSalary = salaryRow ? formatRupiahExact(salaryRow.nominal) : '';
           const masterError = masterGajiError
               ? `Data gaji gagal dimuat: ${masterGajiError}`
-              : 'Gaji tidak ditemukan pada Master_Gaji_Pangkat untuk pangkat dan masa kerja ini.';
+              : 'Gaji tidak ditemukan pada master gaji untuk pangkat dan masa kerja ini.';
 
           input.value = formattedSalary;
           input.setCustomValidity(formattedSalary ? '' : masterError);
@@ -1995,7 +1888,6 @@
           resetPasswordUsername = null;
           activeLetterData = null;
           activeReportContext = null;
-          clearStoredSessionToken();
           updateAdminNavigation();
           closeUserDialog(activeUserDialog, false);
           document.getElementById('print-modal-container').classList.add('hidden');
@@ -2260,7 +2152,7 @@
                   : api.createLetter(formData)))
               .then(result => {
                   if (!result || result.status !== 'success') {
-                      throw createApiError(result, `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`);
+                      throw createApiError(result, `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di basis data.`);
                   }
                   const savedData = { ...formData, ...(result.data || {}), id: isEditing ? letterIdBeingEdited : result.data?.id };
                   if (isEditing) {
@@ -2272,13 +2164,13 @@
                       }
                       lettersDatabase[existingIndex] = savedData;
                       setEditingMode(null);
-                      showToast('Berhasil Diperbarui!', 'Perubahan data KGB telah disimpan ke Spreadsheet.', true);
+                      showToast('Berhasil Diperbarui!', 'Perubahan data KGB telah disimpan ke basis data.', true);
                   } else {
                       // requestId tertunda hanya dibersihkan setelah backend mengonfirmasi sukses.
                       clearPendingLetterRequest(pendingCreate?.requestId);
                       lettersDatabase = lettersDatabase.filter(item => item.id !== savedData.id);
                       lettersDatabase.unshift(savedData);
-                      showToast('Berhasil Disimpan!', 'Data KGB telah masuk ke Spreadsheet.', true);
+                      showToast('Berhasil Disimpan!', 'Data KGB telah masuk ke basis data.', true);
                   }
                   updateDashboardStats();
                   renderHistoryTable();
@@ -3130,7 +3022,7 @@
                           <button onclick="editHistoryItem('${escapeInlineHandlerArg(item.id)}')" class="bg-amber-50 hover:bg-amber-600 hover:text-white text-amber-600 p-2 rounded-lg transition" title="Edit Surat" aria-label="Edit surat ${escapeHtml(item.nama)}">
                               <i class="fas fa-pen-to-square"></i>
                           </button>
-                          <button onclick="deleteHistoryItem('${escapeInlineHandlerArg(item.id)}', this)" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus dari Database_Surat" aria-label="Hapus surat ${escapeHtml(item.nama)}">
+                          <button onclick="deleteHistoryItem('${escapeInlineHandlerArg(item.id)}', this)" class="bg-red-50 hover:bg-red-600 hover:text-white text-red-600 p-2 rounded-lg transition" title="Hapus dari arsip surat" aria-label="Hapus surat ${escapeHtml(item.nama)}">
                               <i class="fas fa-trash-can"></i>
                           </button>
                       </td>
@@ -3152,7 +3044,7 @@
           }
 
           const confirmed = window.confirm(
-              `Hapus surat ${item.suratNomor || item.id} atas nama ${item.nama || '-'} dari Database_Surat?\n\nData yang telah dihapus tidak dapat dikembalikan.`
+              `Hapus surat ${item.suratNomor || item.id} atas nama ${item.nama || '-'} dari arsip surat?\n\nData yang telah dihapus tidak dapat dikembalikan.`
           );
           if (!confirmed) return;
 
@@ -3177,7 +3069,7 @@
                   renderHistoryTable();
                   updateDashboardStats();
                   renderReport();
-                  showToast('Arsip Berhasil Dihapus', 'Data surat telah dihapus dari Database_Surat.', true);
+                  showToast('Arsip Berhasil Dihapus', 'Data surat telah dihapus dari arsip surat.', true);
               })
               .catch(error => {
                   showToast('Hapus Gagal', getMutationErrorMessage(error, 'Data surat gagal dihapus.'), false);

@@ -1,7 +1,7 @@
 # Implementation Plan: Migrasi SIPSID-KGB ke Satu Tech Stack (Cloudflare + D1)
 
 Branch kerja: `migration/cloudflare-d1` (dibuat dari `main` @ `e2fcf05`, disinkronkan ke `main` @ `c6bafd4`).
-Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Fase 0 dan **Fase 1 selesai**; status per langkah ada di Bagian 8.
+Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Persiapan teknis Fase 0 serta **Fase 1–3 selesai**; status per langkah dan batas validasi ada di Bagian 8. Cutover produksi belum dilakukan.
 
 ## 1. Ringkasan
 
@@ -433,6 +433,51 @@ Catatan:
 
 **Selesai jika:** transformasi deterministik, baris bermasalah masuk karantina, dan validasi (Bagian 9.4) lulus pada salinan data.
 
+#### Perintah tooling Fase 2
+
+Jalankan dengan Node.js 24. File input maupun output mengandung data pribadi; gunakan direktori `migration-data/` yang diabaikan Git. Jangan menjalankan import remote selama latihan.
+
+```powershell
+node scripts/migrate-sheets-to-d1.mjs --users migration-data/Master_User.csv --letters migration-data/Database_Surat.csv --salary migration-data/Master_Gaji_Pangkat.csv --migrated-at 2026-10-15T00:00:00.000Z --out migration-data/seed
+```
+
+`--migrated-at` adalah waktu tetap untuk metadata user/master gaji, bukan waktu surat. Gunakan nilai yang sama untuk mengulang latihan agar hasil identik; saat cutover gunakan waktu snapshot cutover. SQL memakai `INSERT` biasa dan harus diterapkan ke database kosong.
+
+- Exit `0`: `READY`, tidak ada karantina; exit `2`: abort/karantina, tidak boleh cutover; exit `1`: penggunaan atau IO gagal.
+- `--allow-quarantine` hanya menghasilkan SQL untuk pemeriksaan baris yang lolos, **bukan** persetujuan import produksi.
+- Manifest memuat jumlah baris, agregat, dan checksum kanonik tiap tabel. Nilai `NULL`, string kosong, dan teks `NULL` dibedakan; urutan kolom tetap. Exporter menggunakan fungsi checksum dan agregat yang sama.
+
+Ekspor balik snapshot SQLite lokal (read-only):
+
+```powershell
+node scripts/export-d1-to-csv.mjs --sqlite migration-data/rehearsal.sqlite --manifest migration-data/seed/manifest.json --out migration-data/rollback-check
+```
+
+Untuk membaca D1 lokal melalui Wrangler tanpa mencari file SQLite internal:
+
+```powershell
+node scripts/export-d1-to-csv.mjs --database sipsid-kgb --local --persist-to migration-data/local-d1 --manifest migration-data/seed/manifest.json --out migration-data/rollback-local
+```
+
+Ekspor remote hanya dilakukan saat rollback dengan flag `--remote --ack-frozen`, setelah freeze aplikasi baru benar-benar aktif. `--env preview` memilih binding preview. Script hanya menjalankan `SELECT` tetap; tidak mengubah D1 atau Spreadsheet.
+
+Exporter menghasilkan tiga CSV lengkap dalam urutan kolom Spreadsheet lama dan `export-report.json`. Direktori output harus diabaikan Git, bukan symlink/junction, dan file yang sudah ada tidak ditimpa. Import identifier/NIP ke Sheets sebagai **teks**. Formula berbahaya di sel teks diberi awalan apostrof; jangan menghapus awalan itu tanpa pemeriksaan. PBKDF2 tidak dapat dipakai oleh GAS: ekspor ditolak kecuali `--allow-password-reset` diberikan, lalu sel password user tersebut dikosongkan dan nomor barisnya dilaporkan untuk reset wajib. Jangan memakai opsi ini sebagai migrasi password otomatis.
+
+`--manifest` dipakai hanya pada snapshot latihan segera setelah import (belum ada mutasi aplikasi). Setelah go-live, perubahan data yang sah memang menyebabkan checksum berbeda; gunakan ekspor penuh tanpa manifest lama dan lakukan rekonsiliasi tambah/ubah/hapus sesuai Bagian 11.2.
+
+#### Status Fase 2 (2026-10-15) — Selesai
+
+- Transformasi salinan CSV Fase 0: **15 user, 45 surat, 1.056 nilai gaji**, tanpa abort/karantina.
+- Schema dan seed telah dijalankan pada SQLite offline **dan** D1 lokal Wrangler (`--local`, penyimpanan privat di `migration-data/`). Tidak ada import remote atau perubahan pada Spreadsheet.
+- Ekspor balik dari kedua runtime menggunakan `--manifest` lulus: jumlah, agregat, dan checksum seluruh tabel cocok. Semua hash user tetap berformat `sha256$…`; tidak ada reset password yang diperlukan pada dataset latihan.
+- Pembandingan offline ke `rowToLetter_` GAS: **45/45 surat memiliki urutan dan seluruh field API yang sama** (nilai Rupiah dibandingkan sesudah normalisasi format). Pengulangan transformasi dengan waktu migrasi sama menghasilkan seluruh file byte-identik.
+- Pembandingan bootstrap offline ke `readMasterGaji_` GAS: **530 nilai PNS dan 526 nilai PPPK identik, termasuk urutannya**.
+- Snapshot, SQL, CSV rollback, dan laporan validasi berada di direktori yang diabaikan Git. Jangan menyalin direktori ini ke preview publik.
+- Uji login memakai akun sintetis dengan pepper uji. Password user asli tidak dibaca, dicoba, atau direset. Perbandingan visual PDF/CSV dan uji login user asli tetap bagian uji penerimaan Fase 4, bukan disimpulkan dari checksum.
+- Validasi final: **87 test khusus tooling dan 516 test keseluruhan lulus**; build Pages/GAS serta `git diff --check` lulus.
+- Review independen: **APPROVED** setelah satu temuan Medium diperbaiki. Pivot rollback gaji kini mempertahankan label pangkat dan urutan sumber meskipun kode golongan sama; constraint duplikat natural-key tetap diperiksa secara global. Test roundtrip split-row menutup kasus ini. Tidak ada temuan Critical/High/Medium tersisa pada scope tooling yang direview.
+- Keterbatasan operasional: ekspor Wrangler dibatasi buffer 64 MiB; database lebih besar perlu snapshot/ekspor berhalaman. Ekspor remote tidak memberikan snapshot transaksi lintas tabel, sehingga freeze harus diterapkan operator. Mode file POSIX `0600` bukan pengganti ACL Windows.
+
 ### Fase 3 — Frontend satu runtime
 
 1. Hapus `isGasRuntime`, `runGas`, cabang GAS di setiap method `api.*`, penyimpanan `sipsid_session` di storage, dan `INITIAL_SERVER_DATA`.
@@ -447,6 +492,20 @@ Catatan:
 6. Fase 1–3 tetap di branch `migration/cloudflare-d1` dan **baru masuk ke `main` saat cutover** (Bagian 11.1 langkah 7). Setelah itu `build:gas`/`push:gas` tidak boleh dijalankan dari `main`; rollback GAS memakai tag `pre-d1-cutover`.
 
 **Selesai jika:** artifact `dist/` tidak lagi memuat `google.script.run` atau template GAS, build berhasil, dan test frontend lulus.
+
+#### Status Fase 3 (2026-10-15) — Selesai (kode/build)
+
+- Frontend hanya memakai adapter `fetchJson('/api/*')` dengan cookie HttpOnly (`credentials: same-origin`). Template/injeksi server, `isGasRuntime`, `runGas`, penyimpanan token sesi, parser marker error GAS, dan cabang API GAS dihapus. Pending `requestId` tetap disimpan untuk idempotency create.
+- `npm run build` hanya memanggil `build:pages`; public assets disalin ke `dist/` dan output lama dibersihkan sebelum build.
+- Logo dan kop surat resmi disimpan lokal di `public/assets/` tanpa perubahan gambar. Placeholder logo memakai SVG lokal; CSP tidak lagi mengizinkan Google Drive/placeholder eksternal pada `img-src`.
+- `gas/Index.html` tetap menjadi snapshot rollback legacy. Test backend GAS membaca kontrak marker dari snapshot tersebut, bukan dari frontend aktif.
+- Script `build-gas.mjs` melakukan preflight template sebelum menulis file apa pun, sehingga `npm run build:gas` yang tidak sengaja dijalankan pada branch ini tidak merusak snapshot rollback.
+- Dependency UI CDN yang sudah ada (Tailwind, jsPDF/html2canvas, Font Awesome, Google Fonts) tidak dimigrasikan atau diganti pada fase ini; hanya aset logo/kop dan jalur runtime GAS yang ditangani.
+- `public/404.html` mematikan fallback SPA otomatis untuk URL berkas yang hilang, sehingga image tidak tersedia mengembalikan 404 alih-alih HTML berstatus 200.
+- Pengujian final: **512 test keseluruhan lulus**, termasuk **32 test frontend fetch-only** dan **10 test build**. Test GAS legacy tetap berjalan terhadap snapshot rollback; pengurangan jumlah test berasal dari penghapusan skenario direct-GAS frontend yang tidak lagi berlaku.
+- HTTP lokal di salinan terisolasi `wrangler pages dev`: `/` 200; logo/kop PNG 200 `image/png`; fallback SVG 200; aset hilang 404; sesi anonim 401 JSON; API tidak dikenal 404 JSON. CSP `img-src` self/data/blob terverifikasi. Server uji dihentikan.
+- Review independen **APPROVED** untuk kode/build, tanpa temuan Critical/High/Medium. Snapshot `gas/*` dan `Code.js` tidak berubah. Tidak ada deploy atau perubahan database remote pada fase ini.
+- Validasi visual browser, responsivitas nyata, dan penangkapan gambar/font pada PDF tetap gerbang Fase 4; test VM/source dan HTTP tidak dianggap sebagai pengganti uji visual.
 
 ### Fase 4 — Preview dan uji penerimaan
 
@@ -465,6 +524,32 @@ Catatan:
 6. Hapus atau kosongkan D1 preview setelah uji penerimaan jika berisi data asli.
 
 **Selesai jika:** seluruh skenario lulus dan tidak ada selisih data.
+
+#### Status Fase 4 (2026-10-15) — lulus uji penerimaan, kondisional pada build Git
+
+- Pilihan K10: **data sintetis saja**, tanpa mengambil user/hash/pepper atau surat produksi. D1 preview berisi empat akun uji, dua puluh surat anonim, dan enam nilai gaji uji.
+- Binding preview diverifikasi menunjuk `3185cc3a-81a5-49eb-afd2-6b039ad387f8`. Secret `PASSWORD_PEPPER` preview dihasilkan acak; `ALLOWED_ORIGIN` preview dihapus. Konfigurasi produksi dibandingkan sebelum/sesudah PATCH dan tetap identik.
+- Deploy sementara melalui CLI dari working tree belum di-commit: `7b80e8f8.sipsid-kgb.pages.dev` (uji API/browser awal), lalu `98d83e71.sipsid-kgb.pages.dev` (preview aktif sesudah uji maintenance). Ini **belum** membuktikan jalur build Git; commit serta smoke test deployment Git dari commit yang sama tetap gerbang sebelum cutover.
+- API langsung preview: **24/24** lulus (login/cookie, sesi, role guards, surat CRUD/replay, user CRUD/reset/duplikasi, pencabutan sesi, origin, logout). Delapan create simultan dengan requestId sama menghasilkan satu ID/satu baris dan tujuh replay.
+- Uji tambahan: sepuluh create requestId berbeda berhasil; replay payload berbeda tidak menimpa isi asli; update/delete simultan tidak menghidupkan kembali surat; delete/recreate username tidak mengaktifkan sesi lama. Dua admin saling demote simultan menghasilkan `[200,401]`, tersisa satu admin, dan cookie actor yang kalah ditolak; role akun uji kemudian dipulihkan.
+- Dua belas percobaan login salah paralel lintas huruf besar/kecil hanya menghasilkan counter **5**; password benar sesudah burst ditolak. Username tidak dikenal berbagi satu bucket dan tidak memblokir akun sah.
+- Sampel waktu respons jaringan (30 per kategori): median unknown/wrong/throttled **307/324/307 ms** dan p90 **415/410/452 ms**. Respons publik identik. Angka wall-time ini bukan pengukuran CPU atau bukti formal bebas timing side-channel; throttle berbasis username tetap memiliki risiko lockout sementara yang diterima pada desain saat ini.
+- Maintenance preview diuji melalui secret+redeploy pada deployment khusus `0fa81c6a.sipsid-kgb.pages.dev`: ketujuh mutasi `503 maintenance`, login/read/logout tetap berfungsi (**10/10**). Flag preview dipulihkan menjadi false dan preview di-deploy ulang; tidak ada perubahan flag GAS/produksi.
+- Chromium pada deployment **7b80e8f8**, desktop1280/mobile390: **11/11** lulus (login,refresh,simpan/edit kabkot kosong,CSV,PDF surat/laporan,tanpa overflow). Marker `${ttd_pengirim}` terbaca sebagai teks native PDF; kop lokal memiliki dimensi gambar terisi; pangkat penandatangan IV/d ada pada pratinjau. Sel CSV `-` diamankan menjadi `'-` dengan apostrof sesuai perlindungan formula; ini bukan perubahan data.
+- Pada deployment **98d83e71** setelah unfreeze, mutasi akun uji berhasil kembali. Uji saling-demote admin `[200,401]` kemudian memulihkan role akun uji, membuktikan mode maintenance sudah nonaktif.
+- Parity browser dua puluh surat anonim antara snapshot `gas/Index.html` dan frontend baru: **20/20** teks DOM, ukuran/kelas kertas, marker DOM, screenshot identik (selisih piksel **0%**), jumlah halaman PDF, serta marker teks native PDF cocok. CSV kedua versi identik **4.506 byte**. Empat puluh PDF benar-benar dibuat; seluruh header/ukuran file diverifikasi (minimal 433.015 byte). Pembandingan mengabaikan timestamp/ID acak metadata PDF, bukan membandingkan binary PDF.
+- Dataset parity utama berisi PNS/Legal. Dua kasus tambahan **A4 PNS** dan **Legal PPPK** juga cocok 2/2 (selisih piksel 0%, marker/jumlah halaman PDF cocok, CSV identik 584 byte). Pengujian parity memakai routing lokal terkontrol dan aset resmi yang sama, bukan menulis surat ke aplikasi legacy produksi.
+- Digest bukti deploy langsung (SHA-256 atas path+isi file terurut pada `dist/`, `functions/`, `src/server/`): `570dd7ee9352b0d4202f93ecf121b115a721d95137ac3d73ad2dd098ec413470` (15 file). Ini melacak artifact yang diuji, tetapi **bukan** pengganti commit/build Git.
+- Artefak browser/JSON/PDF dan kredensial uji berada di direktori temp privat di luar repository. Kredensial/cookie tidak dimasukkan ke log, source, atau dokumen ini. Preview bersifat publik dan **tidak boleh** diisi data asli tanpa Access.
+
+Gerbang rilis yang belum terpenuhi:
+
+1. Build Git dari commit yang dapat ditelusuri dan smoke test ulang setelah commit/push berizin.
+2. Verifikasi hash/pepper produksi dengan login admin dan pengelola pemilik: belum diuji oleh pengujian sintetis. Harus dilakukan di lingkungan terlindungi atau pada rehearsal/cutover **sebelum** maintenance dilepas; kegagalan memblokir go-live. Password asli tidak boleh dikirim dalam percakapan atau dicoba oleh otomasi ini.
+
+Gerbang parity dua puluh dokumen anonim **sudah lulus**, bukan pekerjaan tertunda; bukti dan batas cakupan tercatat di atas. Review independen hasil uji dan runbook: **APPROVED untuk scope yang telah dikerjakan**, tanpa blocker Critical/High/Medium; tidak menghapus gerbang build Git atau login pemilik saat cutover.
+
+Produksi masih merespons GAS `2.5.4` dengan 530 nilai PNS/526 PPPK. D1 produksi tidak dimigrasikan atau diimport pada fase ini.
 
 ### Fase 5 — Cutover produksi
 
@@ -569,10 +654,12 @@ D1 lokal untuk test disediakan oleh `getPlatformProxy()` dari Wrangler sehingga 
    - Freeze GAS **tetap aktif setelah cutover** agar Spreadsheet tidak menerima data yang menyimpang dari D1.
 4. Ekspor CSV, jalankan transformasi, terapkan schema, import, dan validasi (Bagian 9). Migrasi schema D1 produksi hanya dijalankan di langkah ini (Bagian 9.3 langkah 1), karena build Pages tidak menjalankannya.
 5. Catat **bookmark kedua** setelah validasi import lulus dan sebelum go-live; bookmark ini adalah titik restore yang berisi data.
-6. Set secret `PASSWORD_PEPPER` di Pages production.
-7. Merge `migration/cloudflare-d1` ke `main`; Pages melakukan deploy otomatis.
-8. Smoke test produksi: login per role, list arsip, create, update, laporan, PDF.
-9. Pantau error selama 24–48 jam.
+6. Set secret `PASSWORD_PEPPER` produksi dan **Pages `MAINTENANCE_MODE=true` sebelum deployment baru**. Flag GAS tidak memblokir backend D1; kedua flag berbeda dan harus dikendalikan terpisah.
+7. Merge commit Fase 4 yang lolos uji Git-built preview ke `main` secara fast-forward, atau verifikasi tree hasil merge identik dengan tree yang diuji. Catat SHA sumber dan digest artifact. Pages melakukan deploy otomatis; pastikan `/api/bootstrap` atau `/api/auth/session` melaporkan `backendVersion: 3.0.0` dan satu mutasi diagnostik ditolak `503 maintenance`.
+8. **Saat backend D1 masih frozen**, pemilik akun admin dan pengelola login dengan password masing-masing melalui UI. Verifikasi list arsip, laporan, PDF dan hash/pepper produksi tanpa menulis data. Uji sintetis Fase 4 tidak menggantikan langkah ini.
+   - Jika salah satu gagal: pertahankan kedua freeze, rollback Pages ke deployment `pre-d1-cutover`, lalu lepas freeze GAS. Pages `MAINTENANCE_MODE` dibiarkan true; gateway legacy mengabaikannya dan percobaan cutover berikutnya dimulai dari status frozen yang diketahui. Bila belum ada penulisan bisnis D1, tidak diperlukan rekonsiliasi data surat/user. Jangan reset seluruh password sebagai jalan pintas.
+9. Setelah gerbang login lulus, set Pages `MAINTENANCE_MODE=false` lalu **Retry deployment** melalui dashboard/API untuk commit yang sama; pastikan SHA deployment sama dengan langkah 7 (jangan mengunggah dirty working tree). Kemudian lakukan smoke test create/update memakai record yang jelas bertanda UJI CUTOVER. Hapus record tersebut sebagai admin setelah selesai dan catat pembersihannya. Freeze GAS tetap aktif.
+10. Pantau error selama 24–48 jam.
 
 ### 11.2 Rollback
 
@@ -598,7 +685,7 @@ Rollback ke GAS hanya mungkin sebelum Fase 6.
 | Surat hilang diam-diam saat import | Import tanpa `DO NOTHING`; assertion jumlah baris memblokir cutover |
 | Kode error salah setelah guard 0 baris | Read diagnostik berurutan (Bagian 5.3) dan contract test per kode |
 | Data pribadi bocor di preview publik | Data anonim atau Cloudflare Access (K10) |
-| Pepper atau hash tidak cocok sehingga semua user tidak bisa login | Salin `PASSWORD_PEPPER` persis; uji login dengan hash asli di preview terlindungi |
+| Pepper atau hash tidak cocok sehingga semua user tidak bisa login | Salin `PASSWORD_PEPPER` persis; pemilik admin/pengelola login saat D1 masih frozen sebelum akses tulis dibuka (Bagian 11.1 langkah 8) |
 | NIP yang sudah terpotong di Spreadsheet | Deteksi saat transformasi; karantina dan input ulang dari dokumen sumber |
 | Parsing tanggal ambigu (`10/11/2026`) | Format kolom menjadi ISO pada salinan sebelum ekspor |
 | Data berubah saat cutover | Freeze penulisan selama maintenance |

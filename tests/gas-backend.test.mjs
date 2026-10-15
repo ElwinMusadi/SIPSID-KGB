@@ -3689,7 +3689,8 @@ test("releaseLetterLock_ gagal hanya mencatat kode tetap LOCK_RELEASE_FAILED tan
 // ─── v2.5.3: session-stage diagnostics + "(Kode: CODE)" marker at API boundary ─
 
 const FRONTEND_MARKER = (() => {
-  const html = fs.readFileSync(resolve(root, "Index.html"), "utf8");
+  // GAS rollback contract is frozen in gas/; the live frontend is fetch-only.
+  const html = fs.readFileSync(resolve(root, "gas", "Index.html"), "utf8");
   const match = html.match(/const EMBEDDED_ERROR_MARKER = (\/.+\/);/);
   assert.ok(match, "Index.html harus mendefinisikan EMBEDDED_ERROR_MARKER");
   return vm.runInNewContext(match[1]);

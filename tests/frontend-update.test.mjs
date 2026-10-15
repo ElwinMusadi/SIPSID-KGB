@@ -2,218 +2,473 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import vm from "node:vm";
 
 const root = resolve(import.meta.dirname, "..");
+const readHtml = () => readFile(resolve(root, "Index.html"), "utf8");
+const plain = (value) => JSON.parse(JSON.stringify(value));
+const flush = () => new Promise((done) => setImmediate(done));
+const success = (data) => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: true, data, error: null }) });
+const failure = (code, status = 401) => ({ ok: false, status, headers: { get: () => null }, json: async () => ({ ok: false, data: null, error: { code, message: "Permintaan ditolak." } }) });
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
-test("frontend memakai kontrak update yang sesuai untuk GAS dan Pages", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
+async function loadFrontend({ fetchImpl = async () => success([]), html = null } = {}) {
+  html ??= await readHtml();
+  const script = [...html.matchAll(/<script>\s*([\s\S]*?)<\/script>/g)].at(-1)?.[1];
+  assert.ok(script, "script utama harus dapat diekstrak tanpa penggantian template");
+  const elements = new Map();
+  const timers = [];
+  const fetchCalls = [];
+  const consoleCalls = [];
+  const events = new Map();
+  const blobs = [];
+  const created = [];
+  const storageCalls = [];
+  class Element {
+    constructor(id = "") {
+      this.id = id;
+      this.value = "";
+      this.innerHTML = "";
+      this.innerText = "";
+      this.disabled = false;
+      this.isConnected = true;
+      this.attributes = new Map();
+      this.style = { setProperty() {} };
+      this.lastChild = { textContent: "" };
+      const classes = new Set();
+      this.classList = {
+        add: (...names) => names.forEach((name) => classes.add(name)),
+        remove: (...names) => names.forEach((name) => classes.delete(name)),
+        contains: (name) => classes.has(name),
+        replace: (from, to) => { if (classes.delete(from)) classes.add(to); },
+        toggle: (name, force = !classes.has(name)) => { if (force) classes.add(name); else classes.delete(name); return force; },
+      };
+    }
+    setAttribute(key, value) { this.attributes.set(key, value); }
+    removeAttribute(key) { this.attributes.delete(key); }
+    hasAttribute(key) { return this.attributes.has(key); }
+    setCustomValidity(value) { this.validationMessage = value; }
+    getClientRects() { return [{}]; }
+    querySelectorAll() { return []; }
+    focus() { document.activeElement = this; }
+    reset() {}
+    addEventListener() {}
+    appendChild() {}
+    removeChild() {}
+    click() { this.clicked = true; }
+  }
+  const document = {
+    getElementById(id) { if (!elements.has(id)) elements.set(id, new Element(id)); return elements.get(id); },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener: (type, handler) => events.set(type, handler),
+    removeEventListener: (type) => events.delete(type),
+    createElement: (type) => { const el = new Element(type); created.push(el); return el; },
+    body: new Element("body"), activeElement: null,
+  };
+  const storage = () => ({
+    getItem(key) { storageCalls.push(["get", key]); throw new Error("unexpected storage read"); },
+    setItem(key) { storageCalls.push(["set", key]); throw new Error("unexpected storage write"); },
+    removeItem(key) { storageCalls.push(["remove", key]); throw new Error("unexpected storage removal"); },
+  });
+  const window = { document, scrollTo() {}, confirm: () => true, scrollY: 0, addEventListener() {} };
+  let handler = fetchImpl;
+  const ctx = {
+    document, window, HTMLElement: Element, localStorage: storage(), sessionStorage: storage(),
+    console: Object.fromEntries(["log", "warn", "error", "info"].map((level) => [level, (...args) => consoleCalls.push([level, ...args])])),
+    fetch: (url, options) => { fetchCalls.push({ url, options }); return handler(url, options); },
+    setTimeout: (callback) => { timers.push(callback); return timers.length; }, clearTimeout() {},
+    Blob, URL: { createObjectURL: (blob) => { blobs.push(blob); return "blob:local-test"; } },
+    Promise, JSON, Math, Date, Number, String, Object, Array, Set, Map, RegExp, Error, TypeError, encodeURIComponent,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(script, ctx, { filename: "Index.html" });
+  document.getElementById("main-app").classList.add("hidden");
+  document.getElementById("login-error-msg").classList.add("hidden");
+  const run = (code) => vm.runInContext(code, ctx);
+  return { run, ctx, document, fetchCalls, consoleCalls, storageCalls, blobs, created, events,
+    setFetch: (fn) => { handler = fn; }, runTimers: () => { while (timers.length) timers.shift()(); } };
+}
 
-  assert.match(
-    html,
-    /runGas\('apiUpdateLetter', getStoredSessionToken\(\), id, payload\)/,
-  );
-  assert.match(
-    html,
-    /fetchJson\(`\/api\/letters\/\$\{encodeURIComponent\(id\)\}`, \{ method: 'PUT', body: JSON\.stringify\(payload\) \}\)/,
-  );
-  assert.match(html, /api\.updateLetter\(letterIdBeingEdited, formData\)/);
+const letter = {
+  id: "L1", statusPegawai: "PNS", nama: "Budi", nip: "198001012005011001", pangkat: "Penata (III/c)",
+  jabatan: "Guru", unit: "SMA Negeri 1", kabkot: "", skPejabat: "Gubernur NTT", skTanggal: "2024-01-01",
+  skNomor: "821/1", skTmt: "2024-01-01", mkLamaThn: "10", mkLamaBln: "0", gajiLama: "Rp. 3.000.000,-",
+  mkBaruThn: "12", mkBaruBln: "0", gajiBaruTmt: "2026-01-01", gajiBaru: "Rp. 3.200.000,-",
+  suratNomor: "800/10/2026", suratTanggal: "2026-01-15", signJabatan: "Kepala Dinas Pendidikan dan Kebudayaan",
+  signNama: "Ambrosius Kodo, S.Sos., M.M.", signPangkat: "Pembina Utama Madya (IV/d)", signNip: "197102201995031002", ukuranKertas: "legal",
+};
+const user = { username: "admin", namaLengkap: "Admin Uji", hakAkses: "admin" };
+
+test("frontend hanya fetch dan dapat dieksekusi dengan LF maupun CRLF tanpa template atau token storage", async () => {
+  const html = await readHtml();
+  assert.doesNotMatch(html, /<\?[\s\S]*?\?>|google\.script|\bGAS\b|\bisGasRuntime\b|\brunGas\b|INITIAL_SERVER_DATA|\bserverData\b|parseEmbeddedErrorMarker|EMBEDDED_ERROR_MARKER|SESSION_STORAGE_KEY|sipsid_session|sessionToken|gasBackendVersion|document\.cookie|sessionStorage/);
+  for (const text of [html.replace(/\r\n/g, "\n"), html.replace(/\r?\n/g, "\r\n")]) {
+    const env = await loadFrontend({ html: text });
+    assert.equal(env.run("masterGajiPNS.length + masterGajiPPPK.length"), 0);
+    assert.deepEqual(env.storageCalls, []);
+  }
 });
 
-test("error update mengenali backend yang belum sinkron tanpa menutupi detail upstream", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /code === 'ACTION_NOT_FOUND'/);
-  assert.match(html, /Aksi API tidak dikenal\|Script function not found:/);
-  assert.match(html, /Deployment frontend dan backend belum sinkron/);
-  assert.match(html, /Detail layanan: \$\{message\}/);
-  assert.match(html, /getSubmitErrorMessage\(error, isEditing\)/);
+test("seluruh adapter API memakai route, method, payload dan cookie same-origin sesuai kontrak", async () => {
+  const env = await loadFrontend();
+  const payload = { nama: "Budi", requestId: "request-001" };
+  const userPayload = { username: "staff", namaLengkap: "Staff", hakAkses: "pengelola", password: "password123" };
+  const cases = [
+    ["login", [{ username: "admin", password: "rahasia" }], "/api/auth/login", "POST", { username: "admin", password: "rahasia" }, { user }, { status: "success", user }],
+    ["logout", [], "/api/auth/logout", "POST", {}, {}, { status: "success" }],
+    ["getSession", [], "/api/auth/session", "GET", undefined, { user }, { status: "success", user }],
+    ["getBootstrap", [], "/api/bootstrap", "GET", undefined, { gajiPNS: [], gajiPPPK: [] }, { status: "success", gajiPNS: [], gajiPPPK: [] }],
+    ["listLetters", [], "/api/letters", "GET", undefined, [letter], { status: "success", data: [letter] }],
+    ["createLetter", [payload], "/api/letters", "POST", payload, letter, { status: "success", data: letter }],
+    ["updateLetter", ["L/1 ?", payload], "/api/letters/L%2F1%20%3F", "PUT", payload, letter, { status: "success", data: letter }],
+    ["deleteLetter", ["L/1 ?"], "/api/letters/L%2F1%20%3F", "DELETE", {}, { id: "L/1 ?" }, { status: "success", id: "L/1 ?" }],
+    ["listUsers", [], "/api/users", "GET", undefined, [user], { status: "success", data: [user] }],
+    ["createUser", [userPayload], "/api/users", "POST", userPayload, user, { status: "success", data: user }],
+    ["updateUser", ["staff/ ?", userPayload], "/api/users/staff%2F%20%3F", "PUT", userPayload, user, { status: "success", data: user }],
+    ["resetUserPassword", ["staff/ ?", "password123"], "/api/users/staff%2F%20%3F/password", "PUT", { newPassword: "password123" }, { username: "staff" }, { status: "success", data: { username: "staff" } }],
+    ["deleteUser", ["staff/ ?"], "/api/users/staff%2F%20%3F", "DELETE", {}, { username: "staff" }, { status: "success", data: { username: "staff" } }],
+  ];
+  for (const [method, args, url, httpMethod, body, data, expected] of cases) {
+    env.setFetch(async () => success(data));
+    const result = await env.run(`api.${method}(...${JSON.stringify(args)})`);
+    assert.deepEqual(plain(result), expected, method);
+    const call = env.fetchCalls.at(-1);
+    assert.equal(call.url, url, method);
+    assert.equal(call.options.method || "GET", httpMethod, method);
+    assert.equal(call.options.credentials, "same-origin", method);
+    assert.deepEqual(call.options.body === undefined ? undefined : JSON.parse(call.options.body), body, method);
+    assert.deepEqual(plain(call.options.headers), { "Content-Type": "application/json" }, method);
+    assert.equal("skipSessionExpiry" in call.options, false, "option internal tidak bocor ke fetch");
+  }
+  assert.equal(env.fetchCalls.length, cases.length);
+  assert.deepEqual(env.storageCalls, [], "login/session/logout tidak membaca atau menulis token JavaScript");
 });
 
-test("frontend manajemen user memakai kontrak GAS dan Pages tanpa merender password", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /runGas\('apiListUsers', getStoredSessionToken\(\)\)/);
-  assert.match(html, /runGas\('apiCreateUser', getStoredSessionToken\(\), payload\)/);
-  assert.match(html, /runGas\('apiUpdateUser', getStoredSessionToken\(\), username, payload\)/);
-  assert.match(html, /runGas\('apiResetUserPassword', getStoredSessionToken\(\), username, \{ newPassword \}\)/);
-  assert.match(html, /runGas\('apiDeleteUser', getStoredSessionToken\(\), username\)/);
-  assert.match(html, /fetchJson\('\/api\/users'\)/);
-  assert.match(html, /`\/api\/users\/\$\{encodeURIComponent\(username\)\}\/password`/);
-  assert.doesNotMatch(html, /user\.password|user\.passwordHash|user\.hash/);
+test("startup menunggu restore sebelum protected reads dan mengambil bootstrap sekali", async () => {
+  const session = deferred();
+  const env = await loadFrontend({ fetchImpl: (url) => {
+    if (url === "/api/auth/session") return session.promise;
+    assert.equal(env.run("currentUser.username"), "admin", "protected read sesudah restore");
+    if (url === "/api/letters") return Promise.resolve(success([letter]));
+    if (url === "/api/bootstrap") return Promise.resolve(success({ gajiPNS: [{ pangkat: "III/c", mkg: "10", nominal: "3000000" }], gajiPPPK: [] }));
+    throw new Error(`unexpected ${url}`);
+  } });
+  const startup = env.run("initializeApplication()");
+  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/session"]);
+  assert.equal(env.run("currentUser"), null);
+  session.resolve(success({ user }));
+  await startup;
+  await flush();
+  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/session", "/api/letters", "/api/bootstrap"]);
+  assert.equal(env.run("masterGajiPNS.length"), 1);
+  assert.equal(env.run("arsipSuratLoaded"), true);
+  assert.equal(env.document.getElementById("main-app").classList.contains("hidden"), false);
+  assert.equal(env.document.getElementById("login-page").classList.contains("hidden"), true);
+  assert.deepEqual(env.storageCalls, []);
 });
 
-test("view user dijaga untuk admin dan state dibersihkan saat logout", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /id="nav-users"[\s\S]*class="nav-btn hidden/);
-  assert.match(html, /role === 'admin' \|\| role === 'administrator'/);
-  assert.match(html, /if \(viewId === 'users' && !isAdminUser\(\)\)/);
-  assert.match(html, /usersDatabase = \[\];[\s\S]*usersLoaded = false;[\s\S]*updateAdminNavigation\(\)/);
-  assert.match(html, /id="user-form-password"[^>]*minlength="8"/);
-  assert.match(html, /id="reset-password-new"[^>]*minlength="8"/);
-  assert.match(html, /newPassword !== confirmation/);
+test("startup anonymous401 tetap senyap, tanpa protected read dan tanpa pesan sesi berakhir", async () => {
+  const env = await loadFrontend({ fetchImpl: async (url) => url === "/api/auth/session"
+    ? failure("auth_required") : success({ gajiPNS: [], gajiPPPK: [] }) });
+  env.document.getElementById("toast-title").innerText = "unchanged";
+  await env.run("initializeApplication()");
+  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/session", "/api/bootstrap"]);
+  assert.equal(env.run("currentUser"), null);
+  assert.equal(env.document.getElementById("main-app").classList.contains("hidden"), true);
+  assert.equal(env.document.getElementById("login-error-msg").classList.contains("hidden"), true);
+  assert.equal(env.document.getElementById("login-error-msg").lastChild.textContent, "");
+  assert.equal(env.document.getElementById("toast-title").innerText, "unchanged");
+  assert.deepEqual(env.consoleCalls, []);
+  assert.deepEqual(env.storageCalls, []);
 });
 
-test("render user mengamankan data dan argumen inline", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /const safeArg = escapeInlineHandlerArg\(username\)/);
-  assert.match(html, /const username = escapeHtml\(user\.username \|\| '-'\)/);
-  assert.match(html, /const namaLengkap = escapeHtml\(user\.namaLengkap \|\| '-'\)/);
-  assert.match(html, /const role = escapeHtml\(user\.hakAkses \|\| user\.role \|\| '-'\)/);
+test("login/logout/getSession 401 tidak memicu expiry rekursif, UI logout mengosongkan cache", async () => {
+  const env = await loadFrontend({ fetchImpl: async () => failure("auth_required") });
+  for (const action of ["api.login({ username: 'x', password: 'x' })", "api.getSession()", "api.logout()"] ) {
+    env.run(`currentUser = ${JSON.stringify(user)}`);
+    await env.run(action).catch(() => null);
+    assert.notEqual(env.run("currentUser"), null);
+    assert.equal(env.document.getElementById("login-error-msg").classList.contains("hidden"), true);
+  }
+  env.setFetch(async () => success({}));
+  env.run("lettersDatabase = [{id:'L1'}]; usersDatabase = [{username:'staff'}]; usersLoaded = true; arsipSuratLoaded = true");
+  await env.run("logout()");
+  assert.equal(env.run("currentUser"), null);
+  assert.equal(env.run("lettersDatabase.length + usersDatabase.length"), 0);
+  assert.equal(env.run("usersLoaded || arsipSuratLoaded"), false);
+  assert.deepEqual(env.storageCalls, []);
 });
 
-test("401 dan error sesi ditangani terpusat tanpa memanggil logout API kembali", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /SESSION_ERROR_CODES = new Set\(\['AUTH_REQUIRED', 'SESSION_EXPIRED', 'INVALID_SESSION', 'HTTP_401'\]\)/);
-  assert.match(html, /if \(httpStatus === 401\) return 'HTTP_401'/);
-  assert.match(html, /function expireClientSession\(\)/);
-  assert.match(html, /function clearStoredSessionToken\(\)/);
-  assert.match(html, /if \(!skipSessionExpiry\) handleSessionError\(error, response\.status\)/);
-  assert.match(html, /!\['apiLogin', 'apiLogout', 'apiGetSession'\]\.includes\(method\)/);
-  assert.match(html, /skipSessionExpiry: true/);
-  assert.match(html, /Sesi berakhir\. Silakan masuk kembali\./);
-  const expiryBody = html.match(/function expireClientSession\(\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-  assert.doesNotMatch(expiryBody, /api\.logout|logout\(/);
+test("bootstrap concurrent berbagi promise dan dapat diulang setelah kegagalan", async () => {
+  const pending = deferred();
+  const env = await loadFrontend({ fetchImpl: () => pending.promise });
+  const first = env.run("refreshMasterGaji()");
+  const second = env.run("refreshMasterGaji()");
+  assert.equal(first, second);
+  assert.equal(env.fetchCalls.length, 1);
+  pending.resolve(failure("data_service_unavailable", 503));
+  await first;
+  assert.equal(env.run("masterGajiPromise"), null);
+  assert.notEqual(env.run("masterGajiError"), "");
+  env.setFetch(async () => success({ gajiPNS: [{ pangkat: "Penata (III/c)", mkg: "10", nominal: "3000000" }], gajiPPPK: [] }));
+  env.document.getElementById("pegawai-status").value = "PNS";
+  env.document.getElementById("pegawai-pangkat").value = "Penata (III/c)";
+  env.document.getElementById("mk-lama-thn").value = "10";
+  await env.run("refreshMasterGaji()");
+  assert.equal(env.fetchCalls.length, 2);
+  assert.equal(env.run("masterGajiError"), "");
+  assert.equal(env.document.getElementById("gaji-lama").value, "Rp. 3.000.000,-");
 });
 
-test("session restoration memakai kontrak dual runtime dan cookie Pages", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /async getSession\(\)[\s\S]*runGas\('apiGetSession', token\)/);
-  assert.match(html, /fetchJson\('\/api\/auth\/session', \{ skipSessionExpiry: true \}\)/);
-  assert.match(html, /credentials: 'same-origin'/);
-  assert.doesNotMatch(html, /document\.cookie/);
+test("arsip dedupe request concurrent, cache loaded, retry error dan guard anonim", async () => {
+  const pending = deferred();
+  const env = await loadFrontend({ fetchImpl: () => pending.promise });
+  await env.run("loadArsipSurat(true)");
+  assert.equal(env.fetchCalls.length, 0);
+  env.run(`currentUser = ${JSON.stringify(user)}`);
+  const first = env.run("loadArsipSurat()");
+  const second = env.run("loadArsipSurat(true)");
+  assert.equal(env.fetchCalls.length, 1);
+  assert.equal(env.run("arsipSuratLoading"), true);
+  pending.resolve(success([letter]));
+  await Promise.all([first, second]);
+  assert.equal(env.run("arsipSuratPromise"), null);
+  assert.equal(env.run("arsipSuratLoading"), false);
+  await env.run("loadArsipSurat(true)");
+  assert.equal(env.fetchCalls.length, 1);
+  env.run("arsipSuratLoaded = false");
+  env.setFetch(async () => failure("data_service_unavailable", 503));
+  await env.run("loadArsipSurat()");
+  assert.equal(env.run("arsipSuratLoaded"), false);
+  assert.equal(env.run("arsipSuratPromise"), null);
+  assert.match(env.document.getElementById("history-table-body").innerHTML, /Permintaan ditolak/);
+  env.setFetch(async () => success([]));
+  await env.run("loadArsipSurat()");
+  assert.equal(env.fetchCalls.length, 3);
+  assert.equal(env.run("arsipSuratLoaded"), true);
+  assert.match(env.document.getElementById("history-table-body").innerHTML, /Belum ada arsip surat/);
 });
 
-test("token GAS dimigrasikan ke localStorage dan dibersihkan dari kedua storage", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /localStorage\.getItem\(SESSION_STORAGE_KEY\)/);
-  assert.match(html, /sessionStorage\.getItem\(SESSION_STORAGE_KEY\)/);
-  assert.match(html, /if \(token\) localStorage\.setItem\(SESSION_STORAGE_KEY, token\)/);
-  assert.match(html, /localStorage\.removeItem\(SESSION_STORAGE_KEY\)/);
-  assert.match(html, /sessionStorage\.removeItem\(SESSION_STORAGE_KEY\)/);
-  assert.match(html, /storeSessionToken\(result\.sessionToken\)/);
+test("route dan mutasi user dibatasi admin, self-delete dilarang tanpa API", async () => {
+  const env = await loadFrontend();
+  env.run("currentUser = { username: 'staff', namaLengkap: 'Staff', hakAkses: 'pengelola' }; arsipSuratLoaded = true");
+  env.run("updateAdminNavigation(); navigate('users')");
+  assert.equal(env.document.getElementById("nav-users").classList.contains("hidden"), true);
+  assert.equal(env.document.getElementById("toast-title").innerText, "Akses Ditolak");
+  await env.run("loadUsers(true)");
+  env.run("openUserFormModal(); openResetPasswordModal('staff')");
+  await env.run("submitUserForm({ preventDefault() {} })");
+  await env.run("submitResetPassword({ preventDefault() {} })");
+  await env.run("deleteUserAccount('staff')");
+  assert.equal(env.fetchCalls.length, 0);
+  assert.equal(env.run("activeUserDialog"), null);
+  for (const role of ["admin", "administrator"]) {
+    env.run(`currentUser.hakAkses = ${JSON.stringify(role)}; updateAdminNavigation()`);
+    assert.equal(env.run("isAdminUser()"), true);
+    assert.equal(env.document.getElementById("nav-users").classList.contains("hidden"), false);
+  }
+  await env.run("deleteUserAccount('STAFF')");
+  assert.equal(env.fetchCalls.length, 0);
+  assert.equal(env.document.getElementById("toast-title").innerText, "Aksi Ditolak");
 });
 
-test("startup memulihkan sesi sebelum navigasi memuat arsip dan anonim tetap senyap", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-  const init = html.match(/async function initializeApplication\(\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-  const restore = html.match(/async function restoreSession\(\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-
-  assert.match(html, /populateDropdowns\(\);[\s\S]*setDefaultDates\(\);[\s\S]*initializeApplication\(\)/);
-  assert.match(init, /await restoreSession\(\)/);
-  assert.ok(init.indexOf("await restoreSession()") < init.indexOf("await refreshMasterGaji()"));
-  assert.match(init, /if \(hasUsableInitialMasterGaji\(\)\)/);
-  assert.match(html, /return isGasRuntime\(\) && !masterGajiError &&[\s\S]*masterGajiPNS\.length > 0 \|\| masterGajiPPPK\.length > 0/);
-  assert.ok(restore.indexOf("await api.getSession()") < restore.indexOf("navigate('dashboard')"));
-  assert.match(restore, /return false/);
-  assert.doesNotMatch(restore, /expireClientSession|Sesi berakhir|showToast/);
+test("user loading/cache/error/empty dan render desktop/mobile mengamankan nilai serta tidak merender password", async () => {
+  const env = await loadFrontend();
+  env.run(`currentUser = ${JSON.stringify(user)}`);
+  const pending = deferred();
+  env.setFetch(() => pending.promise);
+  const first = env.run("loadUsers()");
+  await env.run("loadUsers()");
+  assert.equal(env.fetchCalls.length, 1);
+  assert.match(env.document.getElementById("users-state").innerHTML, /Memuat data user/);
+  const unsafe = { username: "x'\"<>&", namaLengkap: "<img src=x onerror=alert(1)>", hakAkses: "<admin>", password: "SECRET-PASSWORD", hash: "SECRET-HASH" };
+  pending.resolve(success([unsafe]));
+  await first;
+  for (const id of ["users-table-body", "users-card-list"]) {
+    const rendered = env.document.getElementById(id).innerHTML;
+    assert.match(rendered, /&lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.match(rendered, /&lt;admin&gt;/);
+    assert.match(rendered, /x\\&#039;&quot;&lt;&gt;&amp;/);
+    assert.doesNotMatch(rendered, /<img|<admin>|SECRET-PASSWORD|SECRET-HASH/);
+  }
+  await env.run("loadUsers()");
+  assert.equal(env.fetchCalls.length, 1);
+  env.setFetch(async () => failure("data_service_unavailable", 503));
+  await env.run("loadUsers(true)");
+  assert.equal(env.run("usersLoaded"), false);
+  assert.match(env.document.getElementById("users-state").innerHTML, /Coba Lagi/);
+  env.setFetch(async () => success([]));
+  await env.run("loadUsers(true)");
+  assert.match(env.document.getElementById("users-state").innerHTML, /Belum ada user/);
 });
 
-test("create surat memakai requestId stabil untuk payload sama dan menghapusnya setelah sukses atau reset", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /const PENDING_LETTER_CREATE_KEY = 'sipsid_pending_letter_create'/);
-  assert.match(html, /crypto\.randomUUID\(\)/);
-  assert.match(html, /function getPayloadFingerprint\(payload\)/);
-  assert.match(html, /Math\.imul\(hashA \^ code, 16777619\)/);
-  assert.doesNotMatch(html, /return JSON\.stringify\(Object\.keys\(payload\)/);
-  assert.match(html, /stored\?\.fingerprint === fingerprint[\s\S]*return stored/);
-  assert.match(html, /pendingLetterRequestMemory\?\.fingerprint === fingerprint/);
-  assert.match(html, /const pending = \{ fingerprint, requestId: createRequestId\(\) \}/);
-  assert.match(html, /const pendingCreate = isEditing \? null : getOrCreatePendingLetterRequest\(formData\)/);
-  assert.match(html, /if \(pendingCreate\) formData\.requestId = pendingCreate\.requestId/);
-  assert.match(html, /clearPendingLetterRequest\(pendingCreate\?\.requestId\)/);
-  const reset = html.match(/function resetForm\(showNotification = true\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-  assert.match(reset, /clearPendingLetterRequest\(\)/);
+test("dialog user menjaga fokus, Tab/Shift+Tab, Escape dan background inert", async () => {
+  const env = await loadFrontend();
+  env.run(`currentUser = ${JSON.stringify(user)}; usersDatabase = [${JSON.stringify(user)}]`);
+  const trigger = env.document.getElementById("open-user");
+  trigger.focus();
+  env.run("openUserFormModal('admin')");
+  env.runTimers();
+  const modal = env.document.getElementById("user-form-modal");
+  const first = env.document.getElementById("user-form-name");
+  const last = env.document.getElementById("user-form-submit");
+  modal.querySelectorAll = () => [first, last];
+  assert.equal(env.document.activeElement, first);
+  assert.equal(env.document.getElementById("user-form-role").disabled, true, "akun sendiri tidak dapat menurunkan role");
+  assert.equal(env.document.getElementById("main-app").hasAttribute("inert"), true);
+  let prevented = 0;
+  const key = (key, shiftKey = false) => env.events.get("keydown")({ key, shiftKey, preventDefault: () => { prevented++; } });
+  last.focus(); key("Tab"); assert.equal(env.document.activeElement, first);
+  key("Tab", true); assert.equal(env.document.activeElement, last);
+  key("Escape"); env.runTimers();
+  assert.equal(prevented, 3);
+  assert.equal(env.run("activeUserDialog"), null);
+  assert.equal(env.document.activeElement, trigger);
+  assert.equal(env.document.getElementById("main-app").hasAttribute("inert"), false);
+  assert.equal(modal.classList.contains("hidden"), true);
 });
 
-test("submit surat memakai guard promise in-flight, menangkap target edit di awal, dan tidak membersihkan requestId saat gagal", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-  const submit = html.match(/function submitKgbForm\(e\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-
-  assert.match(html, /let letterSubmitPromise = null/);
-  assert.match(submit, /if \(letterSubmitPromise\) return letterSubmitPromise/);
-  assert.match(submit, /letterSubmitPromise = Promise\.resolve\(\)/);
-  assert.match(submit, /\.finally\(\(\) => \{\s*letterSubmitPromise = null;\s*\}\)/);
-  assert.ok(submit.indexOf("const letterIdBeingEdited = editingLetterId") < submit.indexOf("const formData = {"));
-  assert.match(submit, /throw createApiError\(result, /);
-
-  const catchBlock = submit.match(/\.catch\(error => \{([\s\S]*?)\n              \}\)/)?.[1] || "";
-  assert.doesNotMatch(catchBlock, /clearPendingLetterRequest|resetForm|setEditingMode|\.reset\(\)/);
-  assert.doesNotMatch(catchBlock, /submitKgbForm\(|api\.createLetter|api\.updateLetter|setTimeout/);
-  assert.match(catchBlock, /getSubmitErrorMessage\(error, isEditing\)/);
-
-  // Diagnostik error tidak pernah mencatat token atau payload.
-  const fetchBody = html.match(/async function fetchJson\(url, options = \{\}\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-  assert.doesNotMatch(fetchBody, /console\./);
-  assert.match(fetchBody, /error\.httpStatus = response\.status/);
-  const createApiErrorBody = html.match(/function createApiError\(result, fallbackMessage, fallbackCode = ''\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-  assert.doesNotMatch(createApiErrorBody, /console\.|sessionToken|getStoredSessionToken|payload|body/);
-});
-
-test("CSV mengutip semua sel, menggandakan kutip, dan menetralkan formula spreadsheet", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-  const csv = html.match(/function csvCell\(value\) \{([\s\S]*?)\n      \}/)?.[1] || "";
-
-  assert.match(csv, /String\(value \?\? ''\)/);
-  assert.match(csv, /\^\\s\*\[=\+\\-@\\t\\r\]/);
-  assert.match(csv, /text = `'\$\{text\}`/);
-  assert.match(csv, /text\.replace\(\/"\/g, '""'\)/);
-  assert.match(html, /headers\.map\(csvCell\)\.join\(","\)/);
-  assert.match(html, /row\.map\(csvCell\)\.join\(","\)/);
-  assert.match(html, /item\.kabkot \|\| '-'/);
-});
-
-test("request arsip concurrent memakai satu in-flight promise yang dapat diulang", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /let arsipSuratPromise = null/);
-  assert.match(html, /if \(arsipSuratPromise\) \{[\s\S]*return arsipSuratPromise\.then/);
-  assert.match(html, /arsipSuratPromise = \(async \(\) => \{/);
-  assert.match(html, /\.finally\(\(\) => \{ arsipSuratPromise = null; \}\)/);
-});
-
-test("Kabupaten atau Kota opsional, mempertahankan nilai kosong, dan tampil sebagai strip", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-  const kabkotMarkup = html.match(/<label[^>]*>\s*Kabupaten \/ Kota<\/label\s*>[\s\S]*?id="pegawai-kabkot"[\s\S]*?<\/select>[\s\S]*?<\/div>/)?.[0] || "";
-
-  assert.doesNotMatch(kabkotMarkup, /\*|required/);
-  assert.match(kabkotMarkup, /<option value="">Pilih Kota\/Kabupaten<\/option>/);
-  assert.match(kabkotMarkup, /Jika Unit Kerja di Dinas Pendidikan dan Kebudayaan, Kabupaten\/Kota tidak wajib diisi\./);
-  assert.match(html, /kabKotSelect\.innerHTML = '<option value="">Pilih Kota\/Kabupaten<\/option>'/);
-  assert.match(html, /document\.getElementById\('pegawai-kabkot'\)\.value = ''/);
-  assert.match(html, /kabkot: document\.getElementById\('pegawai-kabkot'\)\.value/);
-  assert.match(html, /'pegawai-kabkot': item\.kabkot/);
-  assert.match(html, /escapeHtml\(item\.kabkot \|\| '-'\)/);
-  assert.match(html, /item\.kabkot \|\| '-'/);
-  assert.match(html, /kabFilter === "" \|\| item\.kabkot === kabFilter/);
-});
-
-test("dialog user menerapkan fokus, keyboard trap, dan background inert", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
-  assert.match(html, /let userDialogTrigger = null/);
-  assert.match(html, /document\.addEventListener\('keydown', handleUserDialogKeydown\)/);
-  assert.match(html, /event\.key === 'Escape'/);
-  assert.match(html, /event\.key !== 'Tab'/);
-  assert.match(html, /event\.shiftKey && document\.activeElement === first/);
-  assert.match(html, /!event\.shiftKey && document\.activeElement === last/);
-  assert.match(html, /app\.setAttribute\('inert', ''\)/);
-  assert.match(html, /app\.setAttribute\('aria-hidden', 'true'\)/);
-  assert.match(html, /trigger\?\.isConnected/);
-  assert.match(html, /if \(activeUserDialog && activeUserDialog !== modal\) closeUserDialog\(activeUserDialog, false\)/);
-});
-
-test("form user membatasi panjang input sesuai backend", async () => {
-  const html = await readFile(resolve(root, "Index.html"), "utf8");
-
+test("validasi user dan konfirmasi password menolak submit sebelum fetch", async () => {
+  const env = await loadFrontend();
+  env.run(`currentUser = ${JSON.stringify(user)}`);
+  env.document.getElementById("user-form-name").value = "  ";
+  let reported = 0;
+  env.ctx.invalidEvent = { preventDefault() {}, currentTarget: { checkValidity: () => false, reportValidity: () => { reported++; } } };
+  await env.run("submitUserForm(invalidEvent)");
+  assert.equal(env.document.getElementById("user-form-name").validationMessage, "Nama lengkap wajib diisi.");
+  assert.equal(reported, 1);
+  env.document.getElementById("reset-password-new").value = "password111";
+  env.document.getElementById("reset-password-confirm").value = "password222";
+  await env.run("submitResetPassword({ preventDefault() {}, currentTarget: { checkValidity: () => true } })");
+  assert.equal(env.document.getElementById("toast-title").innerText, "Konfirmasi Tidak Sama");
+  assert.equal(env.fetchCalls.length, 0);
+  const html = await readHtml();
   assert.match(html, /id="user-form-username"[^>]*maxlength="64"[^>]*pattern=/);
   assert.match(html, /id="user-form-name"[^>]*maxlength="160"/);
-  assert.match(html, /id="user-form-password"[^>]*minlength="8"[^>]*maxlength="200"/);
-  assert.match(html, /id="reset-password-new"[^>]*minlength="8"[^>]*maxlength="200"/);
-  assert.match(html, /id="reset-password-confirm"[^>]*minlength="8"[^>]*maxlength="200"/);
+  for (const id of ["user-form-password", "reset-password-new", "reset-password-confirm"]) assert.match(html, new RegExp(`id="${id}"[^>]*minlength="8"[^>]*maxlength="200"`));
+});
+
+test("CSV semua sel dikutip, kutip digandakan dan formula dinetralkan, filter serta kabkot kosong dipertahankan", async () => {
+  const env = await loadFrontend();
+  const cell = env.run("csvCell");
+  for (const value of ["=1+1", "+SUM(A1)", "-1", "@cmd", "  =cmd", "\tcmd", "\rmalicious"]) assert.equal(cell(value), `"'${value}"`);
+  assert.equal(cell('Nama "A", B\nC'), '"Nama ""A"", B\nC"');
+  assert.equal(cell(null), '""');
+  assert.equal(cell(0), '"0"');
+  const data = { ...letter, nama: '=HYPERLINK("bad")', unit: 'SMA "Uji", NTT' };
+  env.run(`lettersDatabase = ${JSON.stringify([data, { ...letter, id: "L2", suratTanggal: "2025-01-15" }])}`);
+  env.document.getElementById("report-month-filter").value = "2026-01";
+  env.run("exportToCSV()");
+  const csv = await env.blobs[0].text();
+  assert.match(csv, /^"ID Surat","Status Pegawai","Nama Lengkap"/);
+  assert.match(csv, /"'=HYPERLINK\(""bad""\)"/);
+  assert.match(csv, /"SMA ""Uji"", NTT","'-"/);
+  assert.doesNotMatch(csv, /"L2"/);
+  assert.equal(env.created[0].download, "Data_SIPSID_KGB_NTT.csv");
+  assert.equal(env.created[0].clicked, true);
+});
+
+test("surat mempertahankan kop resmi, data penandatangan/tanggal/pangkat, escaping, marker dan ukuran kertas", async () => {
+  const env = await loadFrontend();
+  const data = { ...letter, nama: '<img src=x onerror="alert(1)">', unit: "Dinas <NTT>", signNip: "1969 0807 1992 031009" };
+  for (const size of ["a4", "legal"]) {
+    env.run(`openPrintModal(${JSON.stringify({ ...data, ukuranKertas: size })})`);
+    const sheet = env.document.getElementById("printable-letter-sheet");
+    assert.equal(sheet.classList.contains(`kertas-${size}`), true);
+    assert.equal(env.document.body.classList.contains(`print-${size}`), true);
+    assert.match(sheet.innerHTML, /src="\/assets\/kop-surat-ntt\.png"/);
+    assert.match(sheet.innerHTML, /15 Januari 2026/);
+    assert.match(sheet.innerHTML, /1 Januari 2024/);
+    assert.match(sheet.innerHTML, /Ambrosius Kodo, S\.Sos\., M\.M\./);
+    assert.match(sheet.innerHTML, /Pembina Utama Madya \(IV\/d\)/);
+    assert.match(sheet.innerHTML, /NIP\. 196908071992031009/);
+    assert.match(sheet.innerHTML, /\$\{ttd_pengirim\}/);
+    assert.match(sheet.innerHTML, /height: 125px;.*translateX\(-60px\)/);
+    assert.match(sheet.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+    assert.doesNotMatch(sheet.innerHTML, /<img src=x/);
+  }
+  const html = await readHtml();
+  assert.match(html, /\.kertas-legal\s*\{\s*width: 215\.9mm;\s*min-height: 355\.6mm;/);
+  assert.match(html, /\.kertas-a4\s*\{\s*width: 210mm;\s*min-height: 297mm;/);
+  assert.match(html, /padding: 10mm 20mm 20mm 20mm/);
+  assert.match(html, /id="sign-pangkat"\s+value="Pembina Utama Madya \(IV\/d\)"\s+readonly/);
+  assert.match(html, /id="sign-nama"\s+value="Ambrosius Kodo, S\.Sos\., M\.M\."\s+readonly/);
+  assert.match(html, /id="sign-nip"\s+value="197102201995031002"/);
+  const kop = env.run("kopSuratHTML");
+  assert.doesNotMatch(kop, /this\.src|logo-fallback/);
+  assert.match(kop, /Kop surat resmi gagal dimuat/);
+  assert.equal((html.match(/src="\/assets\/logo-sipsid-kgb\.png"/g) || []).length, 2);
+  assert.doesNotMatch(html, /googleusercontent|placehold\.co|Google Drive|Spreadsheet/);
+});
+
+test("SRIKANDI geometry menjaga koordinat teks PDF dan menolak marker/batas halaman tidak valid", async () => {
+  const env = await loadFrontend();
+  const sheet = { querySelector: () => ({ textContent: "${ttd_pengirim}", getBoundingClientRect: () => ({ left: 410, top: 810, width: 100, height: 20 }) }),
+    getBoundingClientRect: () => ({ left: 10, top: 10, width: 800, height: 1400 }) };
+  const metrics = env.run("getSrikandiMarkerMetrics")(sheet);
+  assert.deepEqual(plain(metrics), { sheetWidth: 800, centerX: 450, topY: 800, bottomY: 820, baselineY: 816 });
+  const calls = [];
+  const pdf = Object.fromEntries(["setPage", "setFont", "setFontSize", "setTextColor", "text"].map((name) => [name, (...args) => calls.push([name, ...args])]));
+  pdf.getNumberOfPages = () => 2;
+  env.run("addSrikandiMarkerTextLayer")(pdf, metrics, 210, 297, 600);
+  assert.deepEqual(plain(calls), [["setPage", 1], ["setFont", "helvetica", "normal"], ["setFontSize", 10], ["setTextColor", 0, 0, 0], ["text", "${ttd_pengirim}", 118.125, 214.20000000000002, { align: "center" }]]);
+  assert.throws(() => env.run("addSrikandiMarkerTextLayer")(pdf, { ...metrics, topY: 1120, bottomY: 1140, baselineY: 1136 }, 210, 297, 600), /luar halaman PDF/);
+  assert.throws(() => env.run("getSrikandiMarkerMetrics")({ ...sheet, querySelector: () => null }), /tidak ditemukan/);
+  assert.throws(() => env.run("getSrikandiMarkerMetrics")({ ...sheet, getBoundingClientRect: () => ({ left: 10, top: 10, width: 10, height: 10 }) }), /Koordinat/);
+});
+
+test("PDF download mempertahankan html2canvas/jsPDF serta marker text layer untuk A4 dan Legal", async () => {
+  for (const size of ["a4", "legal"]) {
+    const env = await loadFrontend();
+    const sheet = env.document.getElementById("printable-letter-sheet");
+    const marker = { textContent: "${ttd_pengirim}", getBoundingClientRect: () => ({ left: 400, top: 700, width: 100, height: 20 }) };
+    sheet.querySelector = () => marker;
+    sheet.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 1100 });
+    const calls = [];
+    let canvasOptions;
+    env.ctx.html2canvas = async (element, options) => {
+      assert.equal(element, sheet);
+      canvasOptions = options;
+      const hidden = [];
+      options.onclone({ getElementById: () => ({ style: { setProperty: (...args) => hidden.push(args) } }) });
+      assert.deepEqual(hidden, [["visibility", "hidden", "important"]]);
+      return { width: 1600, height: 2200, toDataURL: () => "data:image/jpeg;base64,test" };
+    };
+    env.ctx.window.jspdf = { jsPDF: class {
+      constructor(options) { calls.push(["construct", plain(options)]); this.internal = { pageSize: { getWidth: () => size === "a4" ? 210 : 215.9, getHeight: () => size === "a4" ? 297 : 355.6 } }; }
+      addImage(...args) { calls.push(["image", ...args]); }
+      getNumberOfPages() { return 1; }
+      setPage() {} setFont() {} setFontSize() {} setTextColor() {}
+      text(...args) { calls.push(["text", ...args]); }
+      save(name) { calls.push(["save", name]); }
+    } };
+    env.run(`activeLetterData = ${JSON.stringify({ ...letter, ukuranKertas: size })}`);
+    await env.run("downloadLetterPdf()");
+    assert.deepEqual(calls[0], ["construct", { orientation: "portrait", unit: "mm", format: size, compress: true }]);
+    assert.equal(canvasOptions.scale, 2);
+    assert.equal(canvasOptions.useCORS, true);
+    assert.equal(canvasOptions.allowTaint, false);
+    assert.equal(canvasOptions.logging, false);
+    assert.equal(calls.find(([name]) => name === "text")[1], "${ttd_pengirim}");
+    assert.deepEqual(calls.at(-1), ["save", "Surat-KGB-198001012005011001-2026-01-15.pdf"]);
+    assert.equal(env.document.getElementById("btn-download-pdf").disabled, false);
+    assert.equal(env.document.getElementById("toast-title").innerText, "PDF Berhasil Diunduh");
+  }
+});
+
+test("kabkot tetap opsional dan layout responsif tidak diganti", async () => {
+  const html = await readHtml();
+  const kabkot = html.match(/<label[^>]*>\s*Kabupaten \/ Kota<\/label\s*>[\s\S]*?id="pegawai-kabkot"[\s\S]*?<\/select>[\s\S]*?<\/div>/)?.[0];
+  assert.ok(kabkot);
+  assert.doesNotMatch(kabkot, /\*|required/);
+  assert.match(kabkot, /Jika Unit Kerja di Dinas Pendidikan dan Kebudayaan, Kabupaten\/Kota tidak wajib diisi\./);
+  assert.match(html, /id="users-card-list"[^>]*class="[^"]*md:hidden/);
+  assert.match(html, /overflow-x-auto/);
+  assert.match(html, /grid-cols-1 md:grid-cols-2 lg:grid-cols-4/);
+  assert.match(html, /populateDropdowns\(\);\s*setDefaultDates\(\);\s*initializeApplication\(\)/);
 });

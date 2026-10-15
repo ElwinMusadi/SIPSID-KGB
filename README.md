@@ -1,5 +1,15 @@
 # SIPSID-KGB
 
+## Status branch migrasi Cloudflare + D1
+
+Pada branch `migration/cloudflare-d1`, backend `/api/*` memakai Pages Functions + D1 dan frontend hanya memakai `fetch`. `npm run build` kini **hanya** menghasilkan `dist/` beserta aset lokal. Persyaratan tooling migrasi/test adalah **Node.js 24** (`node:sqlite`). Tidak ada import atau cutover produksi otomatis.
+
+`Code.js`, `gas/`, serta script GAS dipertahankan sebagai referensi rollback sampai Fase 6, bukan target build aktif. Jangan menjalankan `build:gas`, `push:gas`, atau deploy GAS dari branch frontend fetch-only. Untuk rollback gunakan tag `pre-d1-cutover` di worktree terpisah; build GAS menolak frontend tanpa template sebelum menimpa artifact.
+
+Prosedur migrasi, tooling CSV/SQL, validasi data, dan cutover ada di [MIGRATION_PLAN.md](MIGRATION_PLAN.md). Bagian berikut menjelaskan deployment legacy yang tetap hidup di produksi **sampai cutover Fase 5**, bukan arsitektur aktif branch migrasi.
+
+## Deployment legacy (referensi rollback)
+
 Satu repository untuk dua deployment:
 
 - Google Apps Script Web App, dengan `SpreadsheetApp` sebagai data layer.
@@ -16,6 +26,8 @@ Google Sheets tetap menjadi sumber data untuk `Master_User`, `Master_Gaji_Pangka
 - Akun Cloudflare dengan Pages
 
 ## Instalasi dan validasi
+
+Di branch migrasi gunakan Node.js 24 dan `npm ci`; `npm run build` hanya membangun Pages. Instruksi clasp serta artifact `gas/` pada bagian legacy berikut hanya untuk tag rollback, bukan untuk dijalankan dari branch migrasi.
 
 ```powershell
 npm install

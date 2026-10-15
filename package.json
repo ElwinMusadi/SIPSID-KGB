@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:pages && npm run build:gas",
+    "build": "npm run build:pages",
     "build:pages": "node scripts/build-pages.mjs",
     "build:gas": "node scripts/build-gas.mjs",
     "test": "node --test tests/*.test.mjs",
