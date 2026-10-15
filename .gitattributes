@@ -1,2 +1,4 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Auto detect text files and perform LF normalization.
+# eol=lf keeps working-tree files LF on Windows (core.autocrlf=true would
+# otherwise check them out as CRLF), which the inline-script tests rely on.
+* text=auto eol=lf
