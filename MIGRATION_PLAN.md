@@ -353,13 +353,25 @@ migrations_dir = "migrations"
 | 2. K9 v2.5.3 | ✅ Selesai | `808024d` di `main` |
 | 3. Backup Spreadsheet | ⏳ Pemilik | **File → Make a copy** |
 | 4. `PASSWORD_PEPPER` | ⏳ Pemilik | Salin dari Script Properties ke penyimpanan aman |
-| 5. Zona waktu Spreadsheet | ⏳ Pemilik | Periksa **File → Settings** |
-| 6–7. Audit data | 🔧 Tooling siap, ⏳ eksekusi | `scripts/audit-sheets.mjs`; menunggu ekspor CSV pemilik |
+| 5. Zona waktu Spreadsheet | ✅ Selesai | **GMT+08:00 Makassar**, lokasi Indonesia — sama dengan zona waktu script; timestamp kolom A dibaca sebagai UTC+8 |
+| 6–7. Audit data | ✅ Selesai — **PASS, 0 blocking** | Lihat ringkasan di bawah |
 | 8. PBKDF2 | ✅ Selesai | `PASSWORD_HASH_ALGO = sha256` (Bagian 5.5) |
 | 9. Database D1 | ✅ Selesai | `sipsid-kgb` dan `sipsid-kgb-preview`, region APAC, masih kosong |
 | 10. `.gitignore` | ✅ Selesai | `migration-data/`, `*.csv`, `*.seed.sql` |
-| 11. Freeze GAS | ✅ Kode + deploy, ⏳ uji salinan | v2.5.4 di deployment produksi `@50`, flag **nonaktif**; `verify:gas` lulus |
+| 11. Freeze GAS | ✅ Selesai, teruji di produksi | v2.5.4 di deployment `@50`; dengan `MAINTENANCE_MODE=true`, mutasi surat dan user ditolak `503 maintenance` tanpa menulis data, sementara pembacaan tetap `200` |
 | 12. Tag rollback | ✅ Selesai | `pre-d1-cutover` → `c6bafd4` |
+
+Ringkasan audit data produksi (2026-10-15, `--require-all`, exit `0`):
+
+| Sheet | Baris | Akan diimport | Blocking | Warning |
+|---|---|---|---|---|
+| `Master_User` | 15 | 15 | 0 | 0 (3 admin, tanpa duplikat beda huruf, semua hash `sha256$…` valid) |
+| `Database_Surat` | 45 | 45 | 0 | 4 `NIP_NON_STANDARD` (diimport apa adanya, Bagian 9.2) |
+| `Master_Gaji_Pangkat` | 34 | 34 | 0 | 100 sel gaji kosong/nol dilewati (sama dengan GAS) |
+
+- Backfill `request_id`: **45 dari 45** surat memenuhi syarat; tidak ada bentrok antar-tahun.
+- Jumlah sel gaji hasil transformasi sama dengan produksi: **530 PNS, 526 PPPK** (bootstrap `/api/bootstrap`).
+- 4 NIP non-standar (bukan 18 digit) di baris sheet **5, 12, 18, 41** perlu diperiksa pemilik terhadap dokumen sumber; tidak memblokir migrasi.
 
 Catatan langkah 11: freeze bersifat **fail-closed** — jika Script Property tidak dapat dibaca, mutasi ditolak dengan `MAINTENANCE`. Freeze juga memblokir `hashMasterUserPasswords()`, sehingga fungsi tersebut harus dijalankan **sebelum** flag diaktifkan saat cutover (Bagian 9.1 langkah 2 dijalankan sebelum langkah 1).
 
