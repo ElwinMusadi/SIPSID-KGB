@@ -283,6 +283,9 @@ function upstreamStatus(normalized, responseStatus) {
   // Lock contention or transient Spreadsheet outage. Mutations are still never
   // retried by the gateway (see RETRYABLE_ACTIONS): the outcome may be committed.
   if (normalizedCode === "busy" || normalizedCode === "data_service_unavailable") return 503;
+  // Write freeze (GAS v2.5.4+ MAINTENANCE_MODE): mutation rejected before any
+  // write. Session stays valid, so the cookie is kept; mutations not retried.
+  if (normalizedCode === "maintenance") return 503;
   // data_write_failed and any unclassified upstream failure.
   return 502;
 }

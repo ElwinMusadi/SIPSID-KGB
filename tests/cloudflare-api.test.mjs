@@ -1344,3 +1344,60 @@ test("POST /api/letters mutation tidak di-retry meski requestId ada (idempotency
   assert.equal(callCount, 1, "Mutation dengan requestId tetap tidak boleh di-retry di gateway");
   assert.equal(response.status, 504);
 });
+
+// ─── Gateway: GAS v2.5.4 write freeze (MAINTENANCE) ───────────────────────
+
+const USER_MUTATION_REQUESTS = [
+  () => request("/api/users", {
+    method: "POST",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", Cookie: "sipsid_session=tok" },
+    body: JSON.stringify({ username: "baru", password: "password123", namaLengkap: "Baru", hakAkses: "pengelola" }),
+  }),
+  () => request("/api/users/staff", {
+    method: "PUT",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", Cookie: "sipsid_session=tok" },
+    body: JSON.stringify({ namaLengkap: "Staf", hakAkses: "pengelola" }),
+  }),
+  () => request("/api/users/staff/password", {
+    method: "PUT",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", Cookie: "sipsid_session=tok" },
+    body: JSON.stringify({ newPassword: "passwordbaru1" }),
+  }),
+  () => request("/api/users/staff", {
+    method: "DELETE",
+    headers: { Origin: "https://app.example", Cookie: "sipsid_session=tok" },
+  }),
+];
+
+test("MAINTENANCE dari GAS dipetakan ke HTTP 503 untuk 7 mutasi, cookie tidak dihapus, satu panggilan upstream", async () => {
+  const errorMsg = "Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara. (Kode: MAINTENANCE)";
+  const all = [...MUTATION_REQUESTS, ...USER_MUTATION_REQUESTS];
+  assert.equal(all.length, 7);
+  for (const makeRequest of all) {
+    let callCount = 0;
+    const response = await handleRequest({ request: makeRequest(), env }, async () => {
+      callCount++;
+      return gasResponse({ status: "error", errorCode: "MAINTENANCE", errorMsg, gasBackendVersion: "2.5.4" });
+    });
+    assert.equal(callCount, 1, "Mutasi tidak boleh di-retry gateway");
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("Set-Cookie"), null, "MAINTENANCE tidak boleh menghapus session cookie");
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      data: null,
+      error: { code: "maintenance", message: errorMsg },
+      gasBackendVersion: "2.5.4",
+    });
+  }
+});
+
+test("MAINTENANCE dengan upstream HTTP 503 tetap tidak di-retry dan tidak menghapus cookie", async () => {
+  let callCount = 0;
+  const response = await handleRequest({ request: MUTATION_REQUESTS[0](), env }, async () => {
+    callCount++;
+    return gasResponse({ status: "error", errorCode: "MAINTENANCE", errorMsg: "x" }, 503);
+  });
+  assert.equal(callCount, 1);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Set-Cookie"), null);
+});

@@ -9,13 +9,14 @@
  * Version: New version > Deploy. Tanpa langkah ini, endpoint produksi masih
  * melayani versi lama dan akan mengembalikan ACTION_NOT_FOUND untuk aksi baru.
  */
-var GAS_BACKEND_VERSION = "2.5.3";
+var GAS_BACKEND_VERSION = "2.5.4";
 
 var CONFIG_KEYS_ = {
   SPREADSHEET_ID: "SPREADSHEET_ID",
   CLOUDFLARE_API_SECRET: "CLOUDFLARE_API_SECRET",
   SESSION_SIGNING_SECRET: "SESSION_SIGNING_SECRET",
-  PASSWORD_PEPPER: "PASSWORD_PEPPER"
+  PASSWORD_PEPPER: "PASSWORD_PEPPER",
+  MAINTENANCE_MODE: "MAINTENANCE_MODE"
 };
 
 var DEFAULT_SPREADSHEET_ID_ = "1ZwZRVDmgYivLL5NpcwA0OixR2iN6yioQs38J4ftEAvY";
@@ -36,8 +37,66 @@ var PUBLIC_ERROR_CODES_ = [
   "BAD_REQUEST", "PAYLOAD_TOO_LARGE", "ACTION_NOT_FOUND", "VALIDATION_ERROR", "AUTH_REQUIRED",
   "SESSION_EXPIRED", "FORBIDDEN", "UNAUTHORIZED_GATEWAY", "CONFIG_ERROR", "SCHEMA_ERROR", "DATA_ERROR",
   "DUPLICATE_USER", "NOT_FOUND", "LAST_ADMIN_PROTECTED", "TOO_MANY_ATTEMPTS",
-  "BUSY", "DATA_WRITE_DENIED", "DATA_VALIDATION_ERROR", "DATA_SERVICE_UNAVAILABLE", "DATA_WRITE_FAILED"
+  "BUSY", "DATA_WRITE_DENIED", "DATA_VALIDATION_ERROR", "DATA_SERVICE_UNAVAILABLE", "DATA_WRITE_FAILED",
+  "MAINTENANCE"
 ];
+
+// ─── Write freeze (MAINTENANCE_MODE) ────────────────────────────────────────
+//
+// Script Property MAINTENANCE_MODE = "true" (trimmed, case-insensitive) rejects
+// every data mutation (letters.create/update/delete, users.create/update/
+// resetPassword/delete) on BOTH entry paths: doPost (Cloudflare gateway, via
+// dispatchHttpAction_) and direct google.script.run calls to the api* wrappers.
+// Reads, auth.login/logout/session, and bootstrap stay available. Used during
+// the cutover to Cloudflare D1 and kept enabled afterwards so the retired
+// Spreadsheet backend can never diverge from D1.
+//
+// The check runs at the very start of each mutation wrapper: before session
+// validation, before any Spreadsheet access, and before any ScriptLock is
+// requested, so a frozen request touches no rows and takes no lock.
+//
+// Failure policy: FAIL-CLOSED. If PropertiesService throws while reading the
+// flag, the mutation is rejected (code MAINTENANCE, distinct message) and a
+// fixed-code log line is written. Rationale: a freeze that silently opens on a
+// read error could let writes land in Sheets after the D1 export (data loss),
+// while the availability cost is nil — every mutation already needs Script
+// Properties (session signing secret, SPREADSHEET_ID) and would fail anyway.
+var MAINTENANCE_MESSAGE_ = "Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.";
+var MAINTENANCE_UNVERIFIED_MESSAGE_ = "Status pemeliharaan aplikasi tidak dapat diperiksa sehingga perubahan data ditolak sementara. Belum ada data yang diubah. Silakan coba kembali beberapa saat lagi.";
+
+/**
+ * Returns true when MAINTENANCE_MODE is exactly "true" (trimmed, case-insensitive).
+ * Any other value (unset, "", "false", "1", "yes") means writes are allowed.
+ * Throws a MAINTENANCE error when the property cannot be read (fail-closed).
+ */
+function isMaintenanceMode_() {
+  var raw;
+  try {
+    raw = getScriptProperties_().getProperty(CONFIG_KEYS_.MAINTENANCE_MODE);
+  } catch (error) {
+    try {
+      // Fixed code only: never log the raw exception message.
+      console.error("Maintenance flag read failed", JSON.stringify({ code: "MAINTENANCE_FLAG_UNREADABLE" }));
+    } catch (_) {}
+    throw maintenanceError_(MAINTENANCE_UNVERIFIED_MESSAGE_);
+  }
+  return String(raw == null ? "" : raw).trim().toLowerCase() === "true";
+}
+
+/**
+ * Rejects the current mutation when the write freeze is active (or cannot be
+ * verified). Must be called before any session lookup, lock, or sheet access.
+ */
+function assertWritesAllowed_() {
+  if (isMaintenanceMode_()) throw maintenanceError_(MAINTENANCE_MESSAGE_);
+}
+
+// The "(Kode: MAINTENANCE)" marker is embedded up front because google.script.run
+// transports only the message; runLetterApi_ detects the marker and does not
+// add a second one. doPost exposes the same message as errorMsg.
+function maintenanceError_(message) {
+  return appError_("MAINTENANCE", message + " (Kode: MAINTENANCE)");
+}
 
 var LETTER_FIELDS_ = [
   "id", "statusPegawai", "nama", "nip", "pangkat", "jabatan", "unit", "kabkot",
@@ -171,6 +230,8 @@ function resolveLetterSession_(context, sessionToken) {
 function runLetterApi_(operation, rawId, fn) {
   var context = { operation: operation, actor: "", id: validateLetterId_(rawId) || "" };
   try {
+    // Write freeze first: no session read, no lock, no sheet access when frozen.
+    assertWritesAllowed_();
     return fn(context);
   } catch (error) {
     var coded = error;
@@ -196,22 +257,27 @@ function apiListUsers(sessionToken) {
   return listUsers_(session);
 }
 
+// User mutations check the write freeze before the session lookup and lock.
 function apiCreateUser(sessionToken, payload) {
+  assertWritesAllowed_();
   var session = requireCurrentSession_(sessionToken, true);
   return createUser_(payload || {}, session);
 }
 
 function apiUpdateUser(sessionToken, username, payload) {
+  assertWritesAllowed_();
   var session = requireCurrentSession_(sessionToken, true);
   return updateUser_(username, payload || {}, session);
 }
 
 function apiResetUserPassword(sessionToken, username, payload) {
+  assertWritesAllowed_();
   var session = requireCurrentSession_(sessionToken, true);
   return resetUserPassword_(username, payload || {}, session);
 }
 
 function apiDeleteUser(sessionToken, username) {
+  assertWritesAllowed_();
   var session = requireCurrentSession_(sessionToken, true);
   return deleteUser_(username, session);
 }
@@ -356,6 +422,8 @@ function verifyPassword_(password, storedPassword) {
 }
 
 function hashMasterUserPasswords() {
+  // Rewrites Master_User; also blocked by the write freeze.
+  assertWritesAllowed_();
   var props = getScriptProperties_();
   var pepper = props.getProperty(CONFIG_KEYS_.PASSWORD_PEPPER);
   if (!pepper) throw new Error("Set PASSWORD_PEPPER pada Script Properties sebelum migrasi password.");

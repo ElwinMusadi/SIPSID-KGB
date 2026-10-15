@@ -7,3 +7,8 @@ node_modules/
 .clasp.json
 .clasprc.json
 *.log
+
+# Data migrasi Spreadsheet → D1: berisi nama, NIP, gaji, dan hash password. Jangan di-commit.
+migration-data/
+*.csv
+*.seed.sql

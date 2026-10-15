@@ -90,6 +90,7 @@ Tambahkan Script Properties melalui **Project Settings → Script Properties**:
 | `CLOUDFLARE_API_SECRET` | Secret acak, sama dengan secret Cloudflare |
 | `SESSION_SIGNING_SECRET` | Secret acak untuk menandatangani session |
 | `PASSWORD_PEPPER` | Secret acak untuk hash password |
+| `MAINTENANCE_MODE` | Opsional. `true` = write freeze (lihat [Write freeze](#write-freeze-maintenance_mode)) |
 
 `SPREADSHEET_ID` masih mempunyai fallback ke Spreadsheet lama agar deployment GAS tidak langsung rusak. Set property tersebut sebelum production deployment.
 
@@ -147,7 +148,7 @@ npm run verify:gas
 Output yang diharapkan:
 
 ```text
-✔ gasBackendVersion: 2.5.0 (sesuai source)
+✔ gasBackendVersion: 2.5.4 (sesuai source)
 ✔ Semua 14 aksi dikenali oleh deployment aktif
   VERIFIKASI BERHASIL — Deployment GAS aktif sudah up-to-date.
 ```
@@ -170,6 +171,16 @@ clasp push
 4. Periksa kolom password `Master_User` sudah berbentuk `sha256$salt$hash`.
 
 Backend masih menerima plaintext lama sementara untuk transisi. Setelah migrasi berhasil, seluruh row harus berbentuk hash.
+
+### Write freeze (MAINTENANCE_MODE)
+
+Sejak GAS v2.5.4. Dipakai saat cutover ke Cloudflare D1.
+
+- **Aktifkan:** Apps Script → **Project Settings → Script Properties** → tambah/ubah `MAINTENANCE_MODE` = `true`. Hanya nilai `true` (trim, case-insensitive) yang membekukan; tidak perlu deploy ulang.
+- **Nonaktifkan:** hapus property atau isi `false`.
+- **Efek:** `letters.create/update/delete` dan `users.create/update/resetPassword/delete` ditolak dengan kode `MAINTENANCE` ("Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.") pada jalur Cloudflare (`doPost`, HTTP 503, cookie sesi tidak dihapus, tidak di-retry) maupun GAS langsung (`google.script.run`, akhiran `(Kode: MAINTENANCE)`). Penolakan terjadi sebelum validasi sesi, sebelum `ScriptLock`, dan sebelum akses sheet, sehingga tidak ada row yang tersentuh. `hashMasterUserPasswords()` juga diblokir. Baca (`letters.list`, `users.list`, `bootstrap.get`, `auth.session`) serta login/logout tetap berjalan. Frontend menampilkan pesan pemeliharaan sebagai kegagalan pasti, mempertahankan isi formulir dan `requestId` tertunda, dan tidak mengakhiri sesi.
+- **Fail-closed:** bila Script Properties gagal dibaca, mutasi tetap ditolak dengan kode `MAINTENANCE` (pesan "Status pemeliharaan aplikasi tidak dapat diperiksa ...") dan log `MAINTENANCE_FLAG_UNREADABLE`.
+- **Setelah cutover ke D1, `MAINTENANCE_MODE=true` harus tetap aktif** agar Spreadsheet lama tidak menerima tulisan baru yang tidak ikut termigrasi ke D1.
 
 ## Konfigurasi Cloudflare Pages
 

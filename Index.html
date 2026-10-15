@@ -1577,12 +1577,35 @@
           return parts.length ? ` [${parts.join(', ')}]` : '';
       }
 
+      // Write freeze backend (Script Property MAINTENANCE_MODE). Penolakan pasti: backend menolak sebelum lock
+      // dan sebelum menyentuh sheet, jadi tidak ada data yang ditulis. Bukan error sesi.
+      const MAINTENANCE_FALLBACK_MESSAGE = 'Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.';
+
+      function isMaintenanceError(error) {
+          return normalizeApiErrorCode(error) === 'MAINTENANCE';
+      }
+
+      function getMaintenanceErrorMessage(error) {
+          const rawMessage = typeof error?.message === 'string' ? error.message
+              : typeof error?.errorMsg === 'string' ? error.errorMsg : '';
+          const message = parseEmbeddedErrorMarker(rawMessage.trim()).message;
+          return `${message || MAINTENANCE_FALLBACK_MESSAGE}${describeSubmitErrorDiagnostics(error)}`;
+      }
+
+      // Pesan untuk mutasi non-formulir (user, hapus arsip): MAINTENANCE dikenali; selain itu perilaku lama.
+      function getMutationErrorMessage(error, fallbackMessage) {
+          if (isMaintenanceError(error)) return getMaintenanceErrorMessage(error);
+          return error?.message || fallbackMessage;
+      }
+
       function getSubmitErrorMessage(error, isEditing) {
           const fallback = `Data tidak berhasil ${isEditing ? 'diperbarui' : 'disimpan'} di Spreadsheet.`;
           const rawMessage = typeof error?.message === 'string' ? error.message.trim() : '';
           const message = parseEmbeddedErrorMarker(rawMessage).message;
           const code = normalizeApiErrorCode(error);
           const diagnostics = describeSubmitErrorDiagnostics(error);
+
+          if (code === 'MAINTENANCE') return getMaintenanceErrorMessage(error);
 
           const isApiVersionMismatch = code === 'ACTION_NOT_FOUND' ||
               /Aksi API tidak dikenal|Script function not found:\s*apiUpdateLetter/i.test(rawMessage);
@@ -2756,7 +2779,8 @@
 
       function userApiResultData(result, fallbackMessage) {
           if (!result || result.status !== 'success') {
-              throw new Error(result?.errorMsg || fallbackMessage);
+              // createApiError mempertahankan kode (mis. MAINTENANCE) dari envelope; pesan tetap errorMsg/fallback.
+              throw createApiError(result, fallbackMessage);
           }
           return result.data;
       }
@@ -2985,7 +3009,7 @@
               await loadUsers(true);
               showToast(isEditing ? 'User Diperbarui' : 'User Ditambahkan', `Data user ${payload.username} berhasil disimpan.`, true);
           } catch (error) {
-              showToast('Penyimpanan Gagal', error?.message || 'Data user gagal disimpan.', false);
+              showToast('Penyimpanan Gagal', getMutationErrorMessage(error, 'Data user gagal disimpan.'), false);
           } finally {
               button.disabled = false;
               button.innerHTML = originalHtml;
@@ -3032,7 +3056,7 @@
               await loadUsers(true);
               showToast('Password Direset', `Password user ${username} berhasil diperbarui.`, true);
           } catch (error) {
-              showToast('Reset Password Gagal', error?.message || 'Password gagal direset.', false);
+              showToast('Reset Password Gagal', getMutationErrorMessage(error, 'Password gagal direset.'), false);
           } finally {
               button.disabled = false;
               button.innerHTML = originalHtml;
@@ -3058,7 +3082,7 @@
               await loadUsers(true);
               showToast('User Dihapus', `User ${username} berhasil dihapus.`, true);
           } catch (error) {
-              showToast('Hapus User Gagal', error?.message || 'User gagal dihapus.', false);
+              showToast('Hapus User Gagal', getMutationErrorMessage(error, 'User gagal dihapus.'), false);
           } finally {
               if (button?.isConnected) {
                   button.disabled = false;
@@ -3147,7 +3171,7 @@
           api.deleteLetter(id)
               .then(result => {
                   if (!result || result.status !== 'success') {
-                      throw new Error(result?.errorMsg || 'Data surat gagal dihapus.');
+                      throw createApiError(result, 'Data surat gagal dihapus.');
                   }
                   lettersDatabase = lettersDatabase.filter(data => data.id !== id);
                   renderHistoryTable();
@@ -3156,7 +3180,7 @@
                   showToast('Arsip Berhasil Dihapus', 'Data surat telah dihapus dari Database_Surat.', true);
               })
               .catch(error => {
-                  showToast('Hapus Gagal', error?.message || 'Data surat gagal dihapus.', false);
+                  showToast('Hapus Gagal', getMutationErrorMessage(error, 'Data surat gagal dihapus.'), false);
               })
               .finally(() => {
                   if (button) {

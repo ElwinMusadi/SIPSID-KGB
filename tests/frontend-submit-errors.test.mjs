@@ -695,3 +695,175 @@ test("fetchJson Pages: error.code not_found dan marker tersemat tetap menghasilk
   assert.equal(mkError.ref, "0000FFFF");
   assert.equal(marker.run("currentUser"), null, "marker SESSION_EXPIRED di Pages juga mengakhiri sesi");
 });
+
+// ─── v2.5.4: write freeze (MAINTENANCE) ────────────────────────────────────
+
+const MAINTENANCE_TEXT = "Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.";
+const MAINTENANCE_GAS_MESSAGE = `${MAINTENANCE_TEXT} (Kode: MAINTENANCE)`;
+
+function maintenancePagesResponse() {
+  return jsonResponse(
+    { ok: false, data: null, error: { code: "maintenance", message: MAINTENANCE_GAS_MESSAGE }, gasBackendVersion: "2.5.4" },
+    503,
+    { "cf-ray": "9f00aa11bb22cc33-SIN" },
+  );
+}
+
+function assertSessionKept(env) {
+  assert.notEqual(env.run("currentUser"), null, "MAINTENANCE tidak boleh mengakhiri sesi");
+  assert.equal(env.localStorage.getItem("sipsid_session"), SESSION_TOKEN, "token sesi tetap tersimpan");
+  assert.equal(env.document.getElementById("main-app").classList.contains("hidden"), false);
+  assert.notEqual(env.document.getElementById("login-error-msg").lastChild.textContent, " Sesi berakhir. Silakan masuk kembali.");
+}
+
+function assertDefiniteMaintenance(text) {
+  assert.ok(text.startsWith(MAINTENANCE_TEXT), `pesan harus diawali pesan pemeliharaan: ${text}`);
+  assert.match(text, /kode MAINTENANCE/);
+  assert.doesNotMatch(text, /belum dapat dipastikan|Proses lain sedang berlangsung|\(Kode:/);
+}
+
+async function loadSignedIn(options) {
+  const env = await loadFrontend(options);
+  env.run("currentUser = { username: 'admin', namaLengkap: 'Admin', hakAkses: 'admin' }");
+  env.document.getElementById("main-app").classList.remove("hidden");
+  env.document.getElementById("login-page").classList.add("hidden");
+  return env;
+}
+
+test("getSubmitErrorMessage: MAINTENANCE (Pages envelope, marker GAS, tanpa pesan) adalah kegagalan pasti", async () => {
+  const { run } = await loadFrontend();
+  const getMessage = run("getSubmitErrorMessage");
+  const build = (props) => run(`(() => { const e = new Error(${JSON.stringify(props.message || "")}); Object.assign(e, ${JSON.stringify({ ...props, message: undefined })}); return e; })()`);
+
+  for (const isEditing of [false, true]) {
+    const pages = getMessage(build({ message: MAINTENANCE_GAS_MESSAGE, code: "maintenance", httpStatus: 503, backendVersion: "2.5.4" }), isEditing);
+    assertDefiniteMaintenance(pages);
+    assert.match(pages, /HTTP 503/);
+
+    const marker = getMessage(new Error(MAINTENANCE_GAS_MESSAGE), isEditing);
+    assert.equal(marker, `${MAINTENANCE_TEXT} [kode MAINTENANCE]`);
+
+    const empty = getMessage(build({ message: "", code: "MAINTENANCE" }), isEditing);
+    assert.equal(empty, `${MAINTENANCE_TEXT} [kode MAINTENANCE]`, "fallback pesan pemeliharaan");
+  }
+  assert.equal(run("isSessionError")({ code: "MAINTENANCE" }, 503), false);
+});
+
+test("create via GAS: MAINTENANCE -> pesan pasti, requestId tertunda & form dipertahankan, sesi tidak berakhir", async () => {
+  const env = await loadSignedIn();
+  const { run, document, localStorage, ctx, gasCalls } = env;
+  ctx.__gasBehavior = () => gasFailure(MAINTENANCE_GAS_MESSAGE);
+  fillForm(document);
+  const before = snapshotForm(document);
+
+  await run("submitKgbForm()");
+
+  assert.equal(gasCalls.length, 1, "tidak ada retry otomatis");
+  assert.equal(gasCalls[0].method, "apiCreateLetter");
+  const firstRequestId = gasCalls[0].args[1].requestId;
+  assert.ok(firstRequestId);
+  assert.equal(JSON.parse(localStorage.getItem("sipsid_pending_letter_create")).requestId, firstRequestId);
+  assert.deepEqual(snapshotForm(document), before);
+  assert.equal(document.getElementById("toast-title").innerText, "Penyimpanan Gagal");
+  assertDefiniteMaintenance(document.getElementById("toast-msg").innerText);
+  assert.equal(document.getElementById("btn-submit-form").disabled, false);
+  assertSessionKept(env);
+
+  // Setelah pemeliharaan selesai, pengiriman ulang memakai requestId yang sama.
+  ctx.__gasBehavior = () => ({ success: { status: "success", data: { id: "KGB-2026-x" } } });
+  await run("submitKgbForm()");
+  assert.equal(gasCalls[1].args[1].requestId, firstRequestId);
+});
+
+test("create via Pages: HTTP 503 maintenance -> pesan pasti, requestId tertunda dipertahankan, sesi tidak berakhir", async () => {
+  let fetchCalls = 0;
+  const env = await loadSignedIn({ fetchImpl: async () => { fetchCalls++; return maintenancePagesResponse(); } });
+  const { run, document, localStorage } = env;
+  run("api.createLetter = async (payload) => ({ status: 'success', data: await fetchJson('/api/letters', { method: 'POST', body: JSON.stringify(payload) }) })");
+  fillForm(document);
+  const before = snapshotForm(document);
+
+  await run("submitKgbForm()");
+
+  assert.equal(fetchCalls, 1);
+  const stored = JSON.parse(localStorage.getItem("sipsid_pending_letter_create"));
+  assert.ok(stored?.requestId, "requestId tertunda tetap ada");
+  assert.deepEqual(snapshotForm(document), before);
+  const toast = document.getElementById("toast-msg").innerText;
+  assertDefiniteMaintenance(toast);
+  assert.match(toast, /HTTP 503, backend v2\.5\.4, gateway 9f00aa11bb22cc33-SIN/);
+  assertSessionKept(env);
+});
+
+test("update via GAS: MAINTENANCE mempertahankan mode edit dan data lokal", async () => {
+  const env = await loadSignedIn();
+  const { run, document, ctx } = env;
+  ctx.__gasBehavior = () => gasFailure(MAINTENANCE_GAS_MESSAGE);
+  run("lettersDatabase = [{ id: 'L1', nama: 'Lama', statusPegawai: 'PNS', suratTanggal: '2026-01-01' }]");
+  run("editingLetterId = 'L1'");
+  fillForm(document, { "pegawai-nama": "Baru" });
+
+  await run("submitKgbForm()");
+
+  assert.equal(document.getElementById("toast-title").innerText, "Pembaruan Gagal");
+  assertDefiniteMaintenance(document.getElementById("toast-msg").innerText);
+  assert.equal(run("editingLetterId"), "L1");
+  assert.equal(run("lettersDatabase[0].nama"), "Lama");
+  assertSessionKept(env);
+});
+
+test("hapus arsip, simpan/reset/hapus user: MAINTENANCE (GAS & Pages) menampilkan pesan pemeliharaan tanpa mengakhiri sesi", async () => {
+  const scenarios = [
+    {
+      title: "Hapus Gagal",
+      act: async (env) => {
+        env.run("lettersDatabase = [{ id: 'L1', nama: 'Lama', suratNomor: '1', statusPegawai: 'PNS', suratTanggal: '2026-01-01' }]");
+        env.run("deleteHistoryItem('L1', document.getElementById('btn-del'))");
+        await flush(); await flush();
+        assert.equal(env.run("lettersDatabase.length"), 1, "arsip lokal tidak dihapus");
+      },
+    },
+    {
+      title: "Penyimpanan Gagal",
+      act: async (env) => {
+        env.document.getElementById("user-form-username").value = "baru";
+        env.document.getElementById("user-form-name").value = "Baru";
+        env.document.getElementById("user-form-role").value = "pengelola";
+        env.document.getElementById("user-form-password").value = "password123";
+        await env.run("submitUserForm({ preventDefault() {}, currentTarget: { checkValidity: () => true, reportValidity() {} } })");
+      },
+    },
+    {
+      title: "Reset Password Gagal",
+      act: async (env) => {
+        env.run("resetPasswordUsername = 'staff'");
+        env.document.getElementById("reset-password-new").value = "passwordbaru1";
+        env.document.getElementById("reset-password-confirm").value = "passwordbaru1";
+        await env.run("submitResetPassword({ preventDefault() {}, currentTarget: { checkValidity: () => true, reportValidity() {} } })");
+      },
+    },
+    {
+      title: "Hapus User Gagal",
+      act: async (env) => { await env.run("deleteUserAccount('staff', document.getElementById('btn-del-user'))"); },
+    },
+  ];
+
+  for (const transport of ["gas-failure", "gas-envelope", "pages"]) {
+    for (const scenario of scenarios) {
+      let fetchCalls = 0;
+      const env = await loadSignedIn({ fetchImpl: async () => { fetchCalls++; return maintenancePagesResponse(); } });
+      if (transport === "gas-failure") env.ctx.__gasBehavior = () => gasFailure(MAINTENANCE_GAS_MESSAGE);
+      else if (transport === "gas-envelope") env.ctx.__gasBehavior = () => ({ success: { status: "error", errorCode: "MAINTENANCE", errorMsg: MAINTENANCE_GAS_MESSAGE } });
+      else env.run("google = undefined");
+
+      await scenario.act(env);
+
+      const label = `${transport} / ${scenario.title}`;
+      if (transport === "pages") assert.equal(fetchCalls, 1, `${label}: satu request`);
+      else assert.equal(env.gasCalls.length, 1, `${label}: satu panggilan GAS`);
+      assert.equal(env.document.getElementById("toast-title").innerText, scenario.title, label);
+      assertDefiniteMaintenance(env.document.getElementById("toast-msg").innerText);
+      assertSessionKept(env);
+    }
+  }
+});

@@ -3217,9 +3217,9 @@ test("create idempotent via dispatchHttpAction_: requestId diteruskan dari paylo
   assert.equal(r1.data.id, r2.data.id);
 });
 
-test("GAS_BACKEND_VERSION adalah 2.5.3 setelah session-stage diagnostics dan marker kode", () => {
+test("GAS_BACKEND_VERSION adalah 2.5.4 setelah write freeze MAINTENANCE_MODE", () => {
   const { ctx } = createGasEnv();
-  assert.equal(ctx.GAS_BACKEND_VERSION, "2.5.3");
+  assert.equal(ctx.GAS_BACKEND_VERSION, "2.5.4");
 });
 
 // ─── v2.5.2: bounded letter lock + staged storage diagnostics ──────────────
@@ -3516,7 +3516,7 @@ test("doPost: storage error mengembalikan envelope lama dengan errorCode baru, t
   assert.deepEqual(Object.keys(json).sort(), ["errorCode", "errorMsg", "gasBackendVersion", "status"]);
   assert.equal(json.status, "error");
   assert.equal(json.errorCode, "DATA_WRITE_DENIED");
-  assert.equal(json.gasBackendVersion, "2.5.3");
+  assert.equal(json.gasBackendVersion, ctx.GAS_BACKEND_VERSION);
   assert.match(json.errorMsg, REF_PATTERN);
   assert.doesNotMatch(out.getContent(), /secret-raw-xyz|protected cell|test-secret-123/);
   assert.notEqual(json.errorMsg, "Layanan sedang mengalami kendala. Silakan coba kembali.");
@@ -3866,4 +3866,249 @@ test("not_found update/delete menyertakan errorCode NOT_FOUND", () => {
   assert.equal(missingUpdate.errorCode, "NOT_FOUND");
   const missingDelete = ctx.apiDeleteLetter(token, "KGB-2026-missing");
   assert.equal(missingDelete.errorCode, "NOT_FOUND");
+});
+
+// ─── v2.5.4: write freeze (Script Property MAINTENANCE_MODE) ──────────────
+
+const MAINTENANCE_MSG = "Aplikasi sedang dalam pemeliharaan. Perubahan data dinonaktifkan sementara.";
+
+/**
+ * Env with one existing letter and an admin token prepared BEFORE the freeze,
+ * plus counters for Spreadsheet opens so "no sheet access" can be asserted.
+ */
+function createFrozenEnv(flagValue) {
+  const env = createGasEnv();
+  const { ctx, userSheet, scriptProperties } = env;
+  const adminToken = makeSessionToken(ctx, userSheet, "admin");
+  const staffToken = makeSessionToken(ctx, userSheet, "staff");
+  const created = ctx.apiCreateLetter(adminToken, sampleLetterPayload());
+  if (flagValue !== undefined) scriptProperties.set("MAINTENANCE_MODE", flagValue);
+  env.lockState.waitLockCalled = 0;
+  env.lockState.releaseLockCalled = 0;
+  const originalOpen = ctx.SpreadsheetApp.openById;
+  const counters = { open: 0, flush: 0 };
+  ctx.SpreadsheetApp = {
+    openById: (...args) => { counters.open++; return originalOpen(...args); },
+    flush: () => { counters.flush++; },
+  };
+  const snapshot = () => JSON.stringify({ letters: env.letterSheet.rows, users: userSheet.rows });
+  return { ...env, adminToken, staffToken, letterId: created.data.id, counters, snapshot };
+}
+
+const FROZEN_MUTATIONS = [
+  {
+    action: "letters.create",
+    direct: (ctx, t) => ctx.apiCreateLetter(t, sampleLetterPayload({ requestId: "freeze-req-001" })),
+    payload: () => sampleLetterPayload({ requestId: "freeze-req-002" }),
+  },
+  {
+    action: "letters.update",
+    direct: (ctx, t, id) => ctx.apiUpdateLetter(t, id, sampleLetterPayload({ nama: "Dibekukan" })),
+    payload: (id) => sampleLetterPayload({ id, nama: "Dibekukan" }),
+  },
+  {
+    action: "letters.delete",
+    direct: (ctx, t, id) => ctx.apiDeleteLetter(t, id),
+    payload: (id) => ({ id }),
+  },
+  {
+    action: "users.create",
+    direct: (ctx, t) => ctx.apiCreateUser(t, { username: "baru1", password: "password123", namaLengkap: "Baru", hakAkses: "pengelola" }),
+    payload: () => ({ username: "baru2", password: "password123", namaLengkap: "Baru", hakAkses: "pengelola" }),
+  },
+  {
+    action: "users.update",
+    direct: (ctx, t) => ctx.apiUpdateUser(t, "staff", { namaLengkap: "Diubah", hakAkses: "admin" }),
+    payload: () => ({ username: "staff", namaLengkap: "Diubah", hakAkses: "admin" }),
+  },
+  {
+    action: "users.resetPassword",
+    direct: (ctx, t) => ctx.apiResetUserPassword(t, "staff", { newPassword: "passwordbaru1" }),
+    payload: () => ({ username: "staff", newPassword: "passwordbaru1" }),
+  },
+  {
+    action: "users.delete",
+    direct: (ctx, t) => ctx.apiDeleteUser(t, "staff"),
+    payload: () => ({ username: "staff" }),
+  },
+];
+
+function postAction(ctx, action, sessionToken, payload) {
+  return JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify({
+    apiSecret: "test-secret-123", action, sessionToken, payload,
+  }) } }).getContent());
+}
+
+function assertNoSideEffects(env, before, label) {
+  assert.equal(env.snapshot(), before, `${label}: tidak ada row berubah`);
+  assert.equal(env.lockState.waitLockCalled, 0, `${label}: lock tidak boleh diambil`);
+  assert.equal(env.lockState.held, false, `${label}: lock tidak tertahan`);
+  assert.equal(env.counters.open, 0, `${label}: Spreadsheet tidak boleh dibuka`);
+  assert.equal(env.counters.flush, 0, `${label}: tidak ada flush`);
+}
+
+test("MAINTENANCE_MODE=true: 7 mutasi via wrapper langsung ditolak MAINTENANCE + marker, tanpa lock/sheet", () => {
+  for (const mutation of FROZEN_MUTATIONS) {
+    const env = createFrozenEnv("true");
+    const before = env.snapshot();
+    let caught;
+    try { mutation.direct(env.ctx, env.adminToken, env.letterId); } catch (err) { caught = err; }
+    assert.ok(caught, `${mutation.action}: harus melempar`);
+    assert.equal(caught.code, "MAINTENANCE", mutation.action);
+    assert.equal(caught.message, `${MAINTENANCE_MSG} (Kode: MAINTENANCE)`, mutation.action);
+    assert.equal(countMarkers(caught.message), 1, `${mutation.action}: marker tidak ganda`);
+    assert.equal(caught.ref, undefined, `${mutation.action}: tanpa Ref storage`);
+    const parsed = caught.message.match(FRONTEND_MARKER);
+    assert.ok(parsed, "parser frontend mengenali marker");
+    assert.equal(parsed[1], "MAINTENANCE");
+    assertNoSideEffects(env, before, `${mutation.action} (direct)`);
+  }
+});
+
+test("MAINTENANCE_MODE=true: 7 mutasi via doPost ditolak errorCode MAINTENANCE (bukan DATA_WRITE_FAILED), tanpa lock/sheet", () => {
+  for (const mutation of FROZEN_MUTATIONS) {
+    const env = createFrozenEnv("true");
+    const before = env.snapshot();
+    const json = postAction(env.ctx, mutation.action, env.adminToken, mutation.payload(env.letterId));
+    assert.deepEqual(Object.keys(json).sort(), ["errorCode", "errorMsg", "gasBackendVersion", "status"]);
+    assert.equal(json.status, "error", mutation.action);
+    assert.equal(json.errorCode, "MAINTENANCE", mutation.action);
+    assert.equal(json.errorMsg, `${MAINTENANCE_MSG} (Kode: MAINTENANCE)`, mutation.action);
+    assert.equal(json.gasBackendVersion, "2.5.4");
+    assertNoSideEffects(env, before, `${mutation.action} (doPost)`);
+  }
+});
+
+test("MAINTENANCE dicek sebelum sesi: token kosong/rusak tetap mendapat MAINTENANCE, bukan AUTH_REQUIRED", () => {
+  const env = createFrozenEnv("true");
+  const before = env.snapshot();
+  assert.throws(() => env.ctx.apiCreateLetter("", sampleLetterPayload()), (err) => err.code === "MAINTENANCE");
+  assert.throws(() => env.ctx.apiDeleteUser("garbage.token", "staff"), (err) => err.code === "MAINTENANCE");
+  assert.equal(postAction(env.ctx, "users.create", "", {}).errorCode, "MAINTENANCE");
+  assertNoSideEffects(env, before, "token tidak valid");
+});
+
+test("MAINTENANCE_MODE: hanya 'true' (trim, case-insensitive) yang membekukan", () => {
+  for (const value of ["true", "TRUE", "True", " TRUE ", "\ttrue\n"]) {
+    const env = createFrozenEnv(value);
+    assert.equal(env.ctx.isMaintenanceMode_(), true, JSON.stringify(value));
+    assert.throws(() => env.ctx.apiCreateLetter(env.adminToken, sampleLetterPayload()), (err) => err.code === "MAINTENANCE",
+      `${JSON.stringify(value)} harus membekukan`);
+  }
+  for (const value of [undefined, "", "false", "FALSE", " false ", "1", "yes", "on", "truee", "t rue"]) {
+    const env = createFrozenEnv(value);
+    assert.equal(env.ctx.isMaintenanceMode_(), false, JSON.stringify(value));
+    const rowsBefore = env.letterSheet.rows.length;
+    const res = env.ctx.apiCreateLetter(env.adminToken, sampleLetterPayload());
+    assert.equal(res.status, "success", `${JSON.stringify(value)} tidak membekukan`);
+    assert.equal(env.letterSheet.rows.length, rowsBefore + 1);
+    const userRes = env.ctx.apiUpdateUser(env.adminToken, "staff", { namaLengkap: "Nama Baru", hakAkses: "pengelola" });
+    assert.equal(userRes.status, "success");
+  }
+});
+
+test("MAINTENANCE_MODE=false/unset: seluruh 7 mutasi berjalan normal via doPost", () => {
+  for (const value of [undefined, "false"]) {
+    for (const mutation of FROZEN_MUTATIONS) {
+      const env = createFrozenEnv(value);
+      const before = env.snapshot();
+      const json = postAction(env.ctx, mutation.action, env.adminToken, mutation.payload(env.letterId));
+      assert.equal(json.status, "success", `${mutation.action} dengan flag ${value}: ${json.errorMsg || ""}`);
+      assert.notEqual(env.snapshot(), before, `${mutation.action} harus menulis`);
+    }
+  }
+});
+
+test("MAINTENANCE_MODE=true: baca, login, logout, session, bootstrap, manifest tetap berjalan", () => {
+  const env = createFrozenEnv("true");
+  const { ctx, userSheet } = env;
+  userSheet.rows.push(["plainuser", "plainpass123", "Plain User", "pengelola"]);
+  env.mockSheets.set("Master_Gaji_Pangkat", new MockSheet("Master_Gaji_Pangkat", [
+    ["Status", "Pangkat", "MKG 0 Tahun"],
+    ["PNS", "Penata (III/c)", 3000000],
+  ], 3));
+  const before = env.snapshot();
+
+  assert.equal(ctx.apiListLetters(env.adminToken).status, "success");
+  assert.equal(ctx.apiListLetters(env.adminToken).data.length, 1);
+  assert.equal(ctx.apiListUsers(env.adminToken).status, "success");
+  assert.equal(ctx.apiGetSession(env.adminToken).status, "success");
+  assert.equal(ctx.apiGetBootstrap().status, "success");
+  assert.equal(ctx.apiLogout().status, "success");
+  const login = ctx.apiLogin({ username: "plainuser", password: "plainpass123" });
+  assert.equal(login.status, "success");
+  assert.ok(login.sessionToken);
+
+  for (const action of ["letters.list", "users.list", "auth.session", "bootstrap.get", "auth.logout", "system.manifest"]) {
+    const json = postAction(ctx, action, env.adminToken, {});
+    assert.equal(json.status, "success", `${action} tetap tersedia saat maintenance`);
+  }
+  const loginPost = postAction(ctx, "auth.login", "", { username: "plainuser", password: "plainpass123" });
+  assert.equal(loginPost.status, "success");
+  assert.equal(env.snapshot(), before, "operasi baca/login tidak mengubah sheet");
+});
+
+test("MAINTENANCE_MODE: gagal membaca property -> fail-closed (MAINTENANCE), log kode tetap, tanpa lock/sheet; baca tetap jalan", () => {
+  const env = createFrozenEnv(undefined);
+  const { ctx, scriptProperties } = env;
+  const logs = captureConsole(ctx);
+  // Hanya pembacaan flag yang gagal; property lain (secret, SPREADSHEET_ID) tetap terbaca.
+  ctx.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (k) => {
+        if (k === "MAINTENANCE_MODE") throw new Error("Properties quota exceeded secret-raw-xyz");
+        return scriptProperties.get(k) || null;
+      },
+      setProperty: (k, v) => scriptProperties.set(k, String(v)),
+      deleteProperty: (k) => scriptProperties.delete(k),
+    }),
+  };
+  const before = env.snapshot();
+
+  for (const mutation of FROZEN_MUTATIONS) {
+    let caught;
+    try { mutation.direct(ctx, env.adminToken, env.letterId); } catch (err) { caught = err; }
+    assert.ok(caught, `${mutation.action}: harus ditolak`);
+    assert.equal(caught.code, "MAINTENANCE");
+    assert.match(caught.message, /tidak dapat diperiksa.*Belum ada data yang diubah.*\(Kode: MAINTENANCE\)$/);
+    assert.equal(countMarkers(caught.message), 1);
+    assert.doesNotMatch(caught.message, /secret-raw-xyz|quota/);
+
+    const json = postAction(ctx, mutation.action, env.adminToken, mutation.payload(env.letterId));
+    assert.equal(json.errorCode, "MAINTENANCE", `${mutation.action} via doPost`);
+    assert.doesNotMatch(json.errorMsg, /secret-raw-xyz|quota/);
+  }
+  assertNoSideEffects(env, before, "flag tidak terbaca");
+  assert.ok(logs.error.some((l) => l.includes("MAINTENANCE_FLAG_UNREADABLE")), "kegagalan dicatat dengan kode tetap");
+  assert.equal(logs.error.join("\n").includes("secret-raw-xyz"), false, "pesan exception mentah tidak dicatat");
+
+  // Baca tidak bergantung pada flag.
+  assert.equal(ctx.apiListLetters(env.adminToken).status, "success");
+  assert.equal(postAction(ctx, "letters.list", env.adminToken, {}).status, "success");
+});
+
+test("MAINTENANCE_MODE: PropertiesService.getScriptProperties melempar -> mutasi ditolak MAINTENANCE sebelum sesi/lock", () => {
+  const env = createFrozenEnv(undefined);
+  captureConsole(env.ctx);
+  env.ctx.PropertiesService = { getScriptProperties: () => { throw new Error("service down secret-raw-xyz"); } };
+  const before = env.snapshot();
+  for (const mutation of FROZEN_MUTATIONS) {
+    assert.throws(() => mutation.direct(env.ctx, env.adminToken, env.letterId),
+      (err) => err.code === "MAINTENANCE" && !/secret-raw-xyz/.test(err.message), mutation.action);
+  }
+  assertNoSideEffects(env, before, "PropertiesService down");
+});
+
+test("MAINTENANCE_MODE=true juga memblokir hashMasterUserPasswords", () => {
+  const env = createFrozenEnv("true");
+  env.userSheet.rows.push(["plainuser", "plainpass123", "Plain User", "pengelola"]);
+  const before = env.snapshot();
+  assert.throws(() => env.ctx.hashMasterUserPasswords(), (err) => err.code === "MAINTENANCE");
+  assertNoSideEffects(env, before, "hashMasterUserPasswords");
+});
+
+test("MAINTENANCE terdaftar sebagai kode publik sehingga tidak dikonversi menjadi DATA_WRITE_FAILED", () => {
+  const { ctx } = createGasEnv();
+  assert.ok(ctx.PUBLIC_ERROR_CODES_.includes("MAINTENANCE"));
+  assert.equal(ctx.publicErrorMessage_(ctx.maintenanceError_(MAINTENANCE_MSG)), `${MAINTENANCE_MSG} (Kode: MAINTENANCE)`);
 });
