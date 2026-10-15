@@ -1,7 +1,7 @@
 # Implementation Plan: Migrasi SIPSID-KGB ke Satu Tech Stack (Cloudflare + D1)
 
 Branch kerja: `migration/cloudflare-d1` (dibuat dari `main` @ `e2fcf05`, disinkronkan ke `main` @ `c6bafd4`).
-Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Persiapan teknis Fase 0 serta **Fase 1–3 selesai**; status per langkah dan batas validasi ada di Bagian 8. Cutover produksi belum dilakukan.
+Status dokumen: **rencana teknis telah direview (APPROVED)**; keputusan K1–K11 **disetujui**. Persiapan teknis Fase 0 serta **Fase 1–4 selesai**; status per langkah dan batas validasi ada di Bagian 8. Cutover produksi belum dilakukan; gerbang login pemilik/pepper produksi tetap wajib pada Fase 5.
 
 ## 1. Ringkasan
 
@@ -525,7 +525,7 @@ Exporter menghasilkan tiga CSV lengkap dalam urutan kolom Spreadsheet lama dan `
 
 **Selesai jika:** seluruh skenario lulus dan tidak ada selisih data.
 
-#### Status Fase 4 (2026-10-15) — lulus uji penerimaan, kondisional pada build Git
+#### Status Fase 4 (2026-10-15) — Selesai, termasuk build Git
 
 - Pilihan K10: **data sintetis saja**, tanpa mengambil user/hash/pepper atau surat produksi. D1 preview berisi empat akun uji, dua puluh surat anonim, dan enam nilai gaji uji.
 - Binding preview diverifikasi menunjuk `3185cc3a-81a5-49eb-afd2-6b039ad387f8`. Secret `PASSWORD_PEPPER` preview dihasilkan acak; `ALLOWED_ORIGIN` preview dihapus. Konfigurasi produksi dibandingkan sebelum/sesudah PATCH dan tetap identik.
@@ -542,12 +542,14 @@ Exporter menghasilkan tiga CSV lengkap dalam urutan kolom Spreadsheet lama dan `
 - Digest bukti deploy langsung (SHA-256 atas path+isi file terurut pada `dist/`, `functions/`, `src/server/`): `570dd7ee9352b0d4202f93ecf121b115a721d95137ac3d73ad2dd098ec413470` (15 file). Ini melacak artifact yang diuji, tetapi **bukan** pengganti commit/build Git.
 - Artefak browser/JSON/PDF dan kredensial uji berada di direktori temp privat di luar repository. Kredensial/cookie tidak dimasukkan ke log, source, atau dokumen ini. Preview bersifat publik dan **tidak boleh** diisi data asli tanpa Access.
 
-Gerbang rilis yang belum terpenuhi:
+- Build Git terverifikasi setelah commit/push berizin: commit `e932c0d4870dd48d49f70ca7cbd61e669d6e8dcd`, deployment preview `5ab72003-5f83-4732-b899-4fd6011bb4e8`, URL `https://5ab72003.sipsid-kgb.pages.dev`. Status Active dan source commit cocok. HTML serta ketiga aset lokal byte-identik dengan build yang diuji.
+- Smoke test deployment Git: **13/13 lulus**, meliputi bootstrap D1 3.0.0, login cookie aman, restorasi sesi, create surat sintetis, replay idempotent, penghapusan record uji, logout/revokasi, dan konfirmasi produksi tetap GAS 2.5.4. Data uji smoke dibersihkan; tidak ada perubahan database produksi. Pembaruan dokumentasi setelah commit ini tidak mengubah tree aplikasi yang diuji.
 
-1. Build Git dari commit yang dapat ditelusuri dan smoke test ulang setelah commit/push berizin.
-2. Verifikasi hash/pepper produksi dengan login admin dan pengelola pemilik: belum diuji oleh pengujian sintetis. Harus dilakukan di lingkungan terlindungi atau pada rehearsal/cutover **sebelum** maintenance dilepas; kegagalan memblokir go-live. Password asli tidak boleh dikirim dalam percakapan atau dicoba oleh otomasi ini.
+Gerbang cutover yang tetap wajib pada Fase 5:
 
-Gerbang parity dua puluh dokumen anonim **sudah lulus**, bukan pekerjaan tertunda; bukti dan batas cakupan tercatat di atas. Review independen hasil uji dan runbook: **APPROVED untuk scope yang telah dikerjakan**, tanpa blocker Critical/High/Medium; tidak menghapus gerbang build Git atau login pemilik saat cutover.
+1. Verifikasi hash/pepper produksi dengan login admin dan pengelola pemilik: belum diuji oleh pengujian sintetis. Harus dilakukan di lingkungan terlindungi atau pada rehearsal/cutover **sebelum** maintenance dilepas; kegagalan memblokir go-live. Password asli tidak boleh dikirim dalam percakapan atau dicoba oleh otomasi ini.
+
+Gerbang parity dua puluh dokumen anonim dan build Git **sudah lulus**, bukan pekerjaan tertunda; bukti dan batas cakupan tercatat di atas. Review independen hasil uji dan runbook: **APPROVED untuk scope yang telah dikerjakan**, tanpa blocker Critical/High/Medium; tidak menghapus gerbang login pemilik saat cutover.
 
 Produksi masih merespons GAS `2.5.4` dengan 530 nilai PNS/526 PPPK. D1 produksi tidak dimigrasikan atau diimport pada fase ini.
 
