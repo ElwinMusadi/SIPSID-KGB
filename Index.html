@@ -908,10 +908,14 @@
                       <option value="a4">A4 (210 x 297 mm)</option>
                     </select>
                   </div>
+                  <!-- Sengaja type="text" + hidden, bukan type="hidden": pada input hidden, mengisi .value
+                       (saat edit surat) menimpa nilai default, sehingga form.reset() tidak mengembalikan
+                       NIP penandatangan default dan surat baru memakai NIP dari surat yang terakhir diedit. -->
                   <input
-                    type="hidden"
+                    type="text"
                     id="sign-nip"
                     value="197102201995031002"
+                    hidden
                   />
                 </div>
               </div>
