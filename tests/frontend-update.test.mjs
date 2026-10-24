@@ -397,7 +397,7 @@ test("surat mempertahankan kop resmi, data penandatangan/tanggal/pangkat, escapi
     const sheet = env.document.getElementById("printable-letter-sheet");
     assert.equal(sheet.classList.contains(`kertas-${size}`), true);
     assert.equal(env.document.body.classList.contains(`print-${size}`), true);
-    assert.match(sheet.innerHTML, /src="\/assets\/kop-surat-ntt\.png"/);
+    assert.match(sheet.innerHTML, /class="kop-surat__lambang" src="\/assets\/lambang-ntt\.png"/);
     assert.match(sheet.innerHTML, /15 Januari 2026/);
     assert.match(sheet.innerHTML, /1 Januari 2024/);
     assert.match(sheet.innerHTML, /Ambrosius Kodo, S\.Sos\., M\.M\./);
@@ -418,6 +418,22 @@ test("surat mempertahankan kop resmi, data penandatangan/tanggal/pangkat, escapi
   const kop = env.run("kopSuratHTML");
   assert.doesNotMatch(kop, /this\.src|logo-fallback/);
   assert.match(kop, /Kop surat resmi gagal dimuat/);
+  // Teks kop resmi sebagai HTML (bukan gambar), sesuai yang dikonfirmasi pengguna.
+  const kopText = kop.replace(/<[^>]+>/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean);
+  assert.deepEqual(kopText, [
+    "PEMERINTAH PROVINSI NUSA TENGGARA TIMUR",
+    "DINAS PENDIDIKAN DAN KEBUDAYAAN",
+    "Jalan Jenderal Soeharto Nomor 57, Naikoten I, Kota Kupang 85118",
+    "Laman: https://dindikbud.nttprov.go.id, Pos-el: dindikbud@nttprov.go.id",
+  ]);
+  assert.match(kop, /kop-surat__garis-tebal[\s\S]*kop-surat__garis-tipis/, "garis penutup ganda");
+  assert.doesNotMatch(html, /kop-surat-ntt\.png/, "kop gambar lama tidak dipakai lagi");
+  // `.kertas-cetak *` memaksa huruf normal; nama pemda dan dinas harus tetap tebal.
+  assert.match(html, /\.kertas-cetak \.kop-surat__pemda,\s*\.kertas-cetak \.kop-surat__dinas\s*\{\s*font-weight: bold !important;/);
+  // Lembar surat bukan flex item: di layar sempit tidak menyusut sehingga PDF tetap 1 halaman.
+  const letterScroll = html.match(/<div\s+class="([^"]*)"\s*>\s*<div\s+id="printable-letter-sheet"/)?.[1];
+  assert.ok(letterScroll);
+  assert.doesNotMatch(letterScroll, /\bflex\b(?!-)/);
   assert.equal((html.match(/src="\/assets\/logo-sipsid-kgb\.png"/g) || []).length, 2);
   assert.doesNotMatch(html, /googleusercontent|placehold\.co|Google Drive|Spreadsheet/);
 });
@@ -476,7 +492,7 @@ test("PDF download mempertahankan html2canvas/jsPDF serta marker text layer untu
     env.run(`activeLetterData = ${JSON.stringify({ ...letter, ukuranKertas: size })}`);
     await env.run("downloadLetterPdf()");
     assert.deepEqual(calls[0], ["construct", { orientation: "portrait", unit: "mm", format: size, compress: true }]);
-    assert.equal(canvasOptions.scale, 2);
+    assert.equal(canvasOptions.scale, 3, "surat dirender ±288 dpi");
     assert.equal(canvasOptions.useCORS, true);
     assert.equal(canvasOptions.allowTaint, false);
     assert.equal(canvasOptions.logging, false);
