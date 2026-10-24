@@ -422,6 +422,16 @@ test("surat mempertahankan kop resmi, data penandatangan/tanggal/pangkat, escapi
   assert.doesNotMatch(html, /googleusercontent|placehold\.co|Google Drive|Spreadsheet/);
 });
 
+test("NIP penandatangan ikut dikembalikan form.reset(): input tersembunyi bukan type=hidden", async () => {
+  // Pada type="hidden", mengisi .value saat edit menimpa nilai default sehingga reset tidak memulihkannya.
+  const html = await readHtml();
+  const input = html.match(/<input[^>]*id="sign-nip"[^>]*>/)?.[0];
+  assert.ok(input);
+  assert.match(input, /type="text"/);
+  assert.match(input, /\shidden\s/);
+  assert.doesNotMatch(html, /<input[^>]*type="hidden"/, "input type=hidden di formulir tidak dipulihkan form.reset()");
+});
+
 test("SRIKANDI geometry menjaga koordinat teks PDF dan menolak marker/batas halaman tidak valid", async () => {
   const env = await loadFrontend();
   const sheet = { querySelector: () => ({ textContent: "${ttd_pengirim}", getBoundingClientRect: () => ({ left: 410, top: 810, width: 100, height: 20 }) }),
