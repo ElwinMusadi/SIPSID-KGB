@@ -25,11 +25,11 @@ test("build utama hanya menghasilkan Pages fetch-only", async () => {
   assert.doesNotMatch(pages, /lh3\.googleusercontent\.com|placehold\.co|sipsid_session/);
   assert.equal(pages, source);
   assert.equal(pkg.scripts.build, "npm run build:pages");
-  for (const asset of ["logo-sipsid-kgb.png", "kop-surat-ntt.png", "logo-fallback.svg"]) {
+  for (const asset of ["logo-sipsid-kgb.png", "lambang-ntt.png", "logo-fallback.svg"]) {
     assert.deepEqual(await readFile(resolve(root, "dist", "assets", asset)), await readFile(resolve(root, "public", "assets", asset)));
     assert.ok(source.includes(`/assets/${asset}`), `Frontend harus merujuk aset lokal ${asset}`);
   }
-  for (const asset of ["logo-sipsid-kgb.png", "kop-surat-ntt.png"]) {
+  for (const asset of ["logo-sipsid-kgb.png", "lambang-ntt.png"]) {
     const png = await readFile(resolve(root, "dist", "assets", asset));
     assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.ok(png.readUInt32BE(16) > 0 && png.readUInt32BE(20) > 0);

@@ -55,6 +55,49 @@
         font-weight: normal !important;
       }
 
+      /* Kop surat resmi (surat KGB dan laporan rekapitulasi). Lambang dan blok teks menjadi satu
+         kelompok di tengah halaman, sejajar tengah secara vertikal, dengan jarak tetap di antaranya. */
+      .kop-surat {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6mm;
+        font-family: Arial, Arimo, "Liberation Sans", Helvetica, sans-serif;
+        color: #000;
+        line-height: 1.2;
+      }
+      .kop-surat__lambang {
+        flex: none;
+        height: 22mm;
+        width: auto;
+      }
+      .kop-surat__teks {
+        text-align: center;
+      }
+      .kertas-cetak .kop-surat__pemda,
+      .kertas-cetak .kop-surat__dinas {
+        font-weight: bold !important;
+        white-space: nowrap;
+      }
+      .kop-surat__pemda {
+        font-size: 13pt;
+      }
+      .kop-surat__dinas {
+        font-size: 16pt;
+        margin-bottom: 1mm;
+      }
+      .kop-surat__alamat {
+        font-size: 10pt;
+      }
+      .kop-surat__garis-tebal {
+        border-top: 2.5pt solid #000;
+        margin-top: 4mm;
+      }
+      .kop-surat__garis-tipis {
+        border-top: 0.75pt solid #000;
+        margin: 1.5pt 0 5mm;
+      }
+
       /* Halaman laporan rekapitulasi: tinggi tetap, satu lembar = satu halaman PDF */
       .report-page {
         height: 355.6mm;
@@ -1259,9 +1302,10 @@
           </div>
         </div>
 
-        <!-- Modal Scrollable Content (Paper Simulation) -->
+        <!-- Modal Scrollable Content (Paper Simulation). Bukan flex: sebagai flex item, lembar
+             kertas menyusut di layar sempit sehingga tata letak dan PDF ikut berubah. -->
         <div
-          class="p-2 sm:p-8 overflow-y-auto bg-slate-200 flex-1 flex justify-center custom-scrollbar"
+          class="p-2 sm:p-8 overflow-auto bg-slate-200 flex-1 custom-scrollbar"
         >
           <div
             id="printable-letter-sheet"
@@ -1652,11 +1696,20 @@
       let userDialogTrigger = null;
       let clientSessionExpiring = false;
 
-      // Kop surat resmi memakai aset lokal; kegagalan tidak diganti dengan gambar lain.
+      // Kop surat resmi: teks HTML (tajam dan mudah diubah) dengan lambang dari aset lokal;
+      // kegagalan memuat lambang tidak diganti dengan gambar lain.
       const kopSuratHTML = `
-          <div style="width: 100%; margin-bottom: 16px; text-align: center;">
-              <img src="/assets/kop-surat-ntt.png" style="width: 100%; height: auto;" alt="Kop Surat Dinas Pendidikan dan Kebudayaan Provinsi NTT" onerror="this.onerror=null; this.alt='Kop surat resmi gagal dimuat. Muat ulang halaman; jika masalah berlanjut, hubungi administrator.';">
+          <div class="kop-surat">
+              <img class="kop-surat__lambang" src="/assets/lambang-ntt.png" alt="Lambang Provinsi Nusa Tenggara Timur" onerror="this.onerror=null; this.alt='Kop surat resmi gagal dimuat. Muat ulang halaman; jika masalah berlanjut, hubungi administrator.';">
+              <div class="kop-surat__teks">
+                  <div class="kop-surat__pemda">PEMERINTAH PROVINSI NUSA TENGGARA TIMUR</div>
+                  <div class="kop-surat__dinas">DINAS PENDIDIKAN DAN KEBUDAYAAN</div>
+                  <div class="kop-surat__alamat">Jalan Jenderal Soeharto Nomor 57, Naikoten I, Kota Kupang 85118</div>
+                  <div class="kop-surat__alamat">Laman: https://dindikbud.nttprov.go.id, Pos-el: dindikbud@nttprov.go.id</div>
+              </div>
           </div>
+          <div class="kop-surat__garis-tebal"></div>
+          <div class="kop-surat__garis-tipis"></div>
       `;
 
       const daftarKabKot = [
@@ -2564,7 +2617,9 @@
               }
 
               const markerMetrics = getSrikandiMarkerMetrics(sheet);
+              // Skala 3 (±288 dpi) agar kop dan teks surat tajam saat dicetak; satu halaman ±0,8 MB.
               const canvas = await renderElementToCanvas(sheet, {
+                  scale: 3,
                   onclone: clonedDocument => {
                       const clonedMarker = clonedDocument.getElementById(SRIKANDI_MARKER_ELEMENT_ID);
                       if (clonedMarker) clonedMarker.style.setProperty('visibility', 'hidden', 'important');
