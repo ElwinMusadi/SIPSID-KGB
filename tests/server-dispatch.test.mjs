@@ -99,9 +99,10 @@ test('dispatch: setiap action dirutekan ke domain yang benar', async () => {
     status: 'success',
     user: { username: 'peng1', namaLengkap: 'Pengelola Satu', hakAkses: 'pengelola' },
   });
-  const boot = await run('bootstrap.get', {}, '');
+  const boot = await run('bootstrap.get', {}, pengToken);
   assert.equal(boot.status, 'success');
   assert.equal(boot.gajiPNS.length, 2);
+  assert.equal((await run('bootstrap.get', {}, '')).errorCode, 'AUTH_REQUIRED');
 
   const created = await run('letters.create', letterPayload({ requestId: REQUEST_ID }), pengToken);
   assert.equal(created.status, 'success');
@@ -207,7 +208,7 @@ test('MAINTENANCE: login, logout, session, dan seluruh pembacaan tetap diizinkan
   assert.equal(login.status, 200);
   assert.match(login.setCookie, /^sipsid_session=/);
   assert.equal((await api(env, '/api/auth/session', { cookie: adminToken })).status, 200);
-  assert.equal((await api(env, '/api/bootstrap')).status, 200);
+  assert.equal((await api(env, '/api/bootstrap', { cookie: pengToken })).status, 200);
   assert.equal((await api(env, '/api/letters', { cookie: pengToken })).status, 200);
   assert.equal((await api(env, '/api/users', { cookie: adminToken })).status, 200);
   const logout = await api(env, '/api/auth/logout', { method: 'POST', body: {}, cookie: pengToken });
@@ -351,9 +352,20 @@ test('golden: login gagal dan throttle → 400 invalid_credentials dengan pesan 
   }
 });
 
-test('golden: bootstrap.get', async () => {
-  const { env } = await setupApi();
-  const res = await api(env, '/api/bootstrap');
+test('golden: bootstrap.get wajib sesi; anonim → 401 tanpa query D1', async () => {
+  const { db, calls } = untouchableDb();
+  const anonymous = await api({ DB: db }, '/api/bootstrap');
+  assert.equal(anonymous.status, 401);
+  assert.deepEqual(anonymous.body, {
+    ok: false,
+    data: null,
+    error: { code: 'auth_required', message: 'Sesi tidak valid. Silakan login kembali.' },
+    backendVersion: '3.0.0',
+  });
+  assert.deepEqual(calls, [], 'tanpa token berbentuk sesi tidak ada baris D1 yang dibaca');
+
+  const { env, pengToken } = await setupApi();
+  const res = await api(env, '/api/bootstrap', { cookie: pengToken });
   assert.equal(res.status, 200);
   assert.deepEqual(res.body, {
     ok: true,

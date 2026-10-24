@@ -59,14 +59,19 @@ export function apiRequest(path, { method = 'GET', body, cookie, origin, content
   return new Request(`${ORIGIN}${path}`, { method, headers: h, ...(text !== undefined ? { body: text } : {}) });
 }
 
-/** Menjalankan gateway dan mengembalikan status, header, dan body JSON. */
+/**
+ * Menjalankan gateway dan mengembalikan status, header, dan body JSON.
+ * `setCookie` = Set-Cookie pertama (cookie sesi) atau null; `setCookies` = seluruh Set-Cookie.
+ */
 export async function callApi(env, path, options = {}) {
   const response = await handleRequest({ request: apiRequest(path, options), env });
   const text = await response.text();
+  const setCookies = response.headers.getSetCookie();
   return {
     response,
     status: response.status,
-    setCookie: response.headers.get('Set-Cookie'),
+    setCookie: setCookies[0] ?? null,
+    setCookies,
     cacheControl: response.headers.get('Cache-Control'),
     text,
     body: JSON.parse(text),

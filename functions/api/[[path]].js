@@ -6,10 +6,14 @@
 // lagi fetch ke GAS, timeout upstream, retry, atau secret GAS.
 
 import { BACKEND_VERSION, dispatch } from "../../src/server/dispatch.js";
+import { DEVICE_TOKEN_MAX_AGE_SECONDS } from "../../src/server/auth.js";
 
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 const DEFAULT_SESSION_MAX_AGE = 8 * 60 * 60;
 const SESSION_COOKIE = "sipsid_session";
+// Cookie perangkat untuk bucket throttle login (src/server/auth.js); hanya dikirim browser ke endpoint login.
+const DEVICE_COOKIE = "sipsid_device";
+const DEVICE_COOKIE_PATH = "/api/auth/login";
 const GENERIC_ERROR_MESSAGE = "Layanan sedang mengalami kendala. Silakan coba kembali.";
 
 const ROUTES = new Map([
@@ -117,6 +121,10 @@ export function clearSessionCookie() {
   return `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
 }
 
+export function createDeviceCookie(token) {
+  return `${DEVICE_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Strict; Path=${DEVICE_COOKIE_PATH}; Max-Age=${DEVICE_TOKEN_MAX_AGE_SECONDS}`;
+}
+
 export function isAllowedOrigin(request, allowedOrigin) {
   const origin = request.headers.get("Origin");
   if (!origin) return false;
@@ -129,15 +137,16 @@ export function isAllowedOrigin(request, allowedOrigin) {
   return origin === expected;
 }
 
+/** `extraHeaders` boleh berisi array (mis. beberapa Set-Cookie); setiap nilai ditambahkan terpisah. */
 function jsonResponse(value, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      ...extraHeaders,
-    },
+  const headers = new Headers({
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
   });
+  for (const [name, values] of Object.entries(extraHeaders)) {
+    for (const item of [].concat(values)) headers.append(name, item);
+  }
+  return new Response(JSON.stringify(value), { status, headers });
 }
 
 function errorResponse(status, code, message) {
@@ -177,7 +186,7 @@ function sanitizeClientValue(value) {
   for (const [key, item] of Object.entries(value)) {
     // Strip known sensitive field names recursively at any depth, so a backend bug
     // that includes a stored password/hash/token can never leak it to the browser.
-    if (/^(?:apiSecret|secret|sessionToken|token|password|passwordHash|password_hash|hash|stack)$/i.test(key)) continue;
+    if (/^(?:apiSecret|secret|sessionToken|deviceToken|token|password|passwordHash|password_hash|hash|stack)$/i.test(key)) continue;
     sanitized[key] = sanitizeClientValue(item);
   }
   return sanitized;
@@ -311,11 +320,13 @@ export async function handleRequest(context) {
     payload = { ...payload, username: route.urlUsername };
   }
 
-  const sessionToken = parseCookies(request.headers.get("Cookie"))[SESSION_COOKIE] || "";
+  const cookies = parseCookies(request.headers.get("Cookie"));
+  const sessionToken = cookies[SESSION_COOKIE] || "";
+  const deviceToken = route.action === "auth.login" ? cookies[DEVICE_COOKIE] || "" : "";
 
   let result;
   try {
-    result = await dispatch(route.action, { db, env, payload, sessionToken });
+    result = await dispatch(route.action, { db, env, payload, sessionToken, deviceToken });
   } catch {
     // dispatch never throws by contract; this is a last-resort guard without exception text.
     console.error("SIPSID API error", { action: route.action, code: "INTERNAL_ERROR" });
@@ -330,10 +341,14 @@ export async function handleRequest(context) {
   if (route.action === "auth.login" && normalized.ok) {
     const session = extractSession(result);
     if (!session.token) return errorResponse(502, "upstream_invalid_response", "Respons login tidak valid.");
-    headers["Set-Cookie"] = createSessionCookie(session.token, session.maxAge);
+    headers["Set-Cookie"] = [createSessionCookie(session.token, session.maxAge)];
+    if (typeof result.deviceToken === "string" && result.deviceToken) {
+      headers["Set-Cookie"].push(createDeviceCookie(result.deviceToken));
+    }
     if (normalized.data && typeof normalized.data === "object") {
       normalized.data = { ...normalized.data };
       delete normalized.data.sessionToken;
+      delete normalized.data.deviceToken;
       delete normalized.data.token;
       delete normalized.data.maxAge;
       delete normalized.data.expiresIn;

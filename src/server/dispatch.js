@@ -31,16 +31,18 @@ export const MUTATION_ACTIONS = Object.freeze([
 const MUTATION_SET = new Set(MUTATION_ACTIONS);
 
 const HANDLERS = new Map([
-  ['auth.login', ({ db, env, payload, now }) => auth.login(db, env, payload, now)],
+  ['auth.login', ({ db, env, payload, deviceToken, now }) => auth.login(db, env, payload, now, { deviceToken })],
   ['auth.logout', ({ db, sessionToken, now }) => auth.logout(db, sessionToken, now)],
   ['auth.session', ({ db, sessionToken, now }) => auth.getSession(db, sessionToken, now)],
-  ['bootstrap.get', ({ db }) => getBootstrap(db)],
+  // Wajib sesi: tanpa sesi, request anonim berulang (±1.056 baris per panggilan) dapat menghabiskan
+  // kuota baca harian D1. Tanpa token berbentuk sesi, penolakan terjadi tanpa query.
+  ['bootstrap.get', async (ctx) => { await userSession(ctx); return getBootstrap(ctx.db); }],
 
-  ['letters.list', async (ctx) => letters.listLetters(ctx.db, await letterSession(ctx))],
-  ['letters.create', async (ctx) => letters.createLetter(ctx.db, await letterSession(ctx), ctx.payload, ctx.now)],
+  ['letters.list', async (ctx) => letters.listLetters(ctx.db, await userSession(ctx))],
+  ['letters.create', async (ctx) => letters.createLetter(ctx.db, await userSession(ctx), ctx.payload, ctx.now)],
   ['letters.update', async (ctx) =>
-    letters.updateLetter(ctx.db, await letterSession(ctx), ctx.payload.id, ctx.payload, ctx.now)],
-  ['letters.delete', async (ctx) => letters.deleteLetter(ctx.db, await letterSession(ctx), ctx.payload.id)],
+    letters.updateLetter(ctx.db, await userSession(ctx), ctx.payload.id, ctx.payload, ctx.now)],
+  ['letters.delete', async (ctx) => letters.deleteLetter(ctx.db, await userSession(ctx), ctx.payload.id)],
 
   ['users.list', async (ctx) => users.listUsers(ctx.db, ctx.env, await adminSession(ctx))],
   ['users.create', async (ctx) => users.createUser(ctx.db, ctx.env, await adminSession(ctx), ctx.payload)],
@@ -63,10 +65,11 @@ export function isMaintenanceMode(env) {
 /**
  * Menjalankan satu action.
  * @param {string} action
- * @param {{ db: object, env?: object, payload?: object, sessionToken?: string, now?: Date|number }} context
+ * @param {{ db: object, env?: object, payload?: object, sessionToken?: string, deviceToken?: string,
+ *   now?: Date|number }} context `deviceToken` = isi cookie perangkat, hanya dipakai `auth.login`.
  * @returns {Promise<object>} objek berbentuk GAS; tidak pernah melempar.
  */
-export async function dispatch(action, { db, env, payload, sessionToken, now } = {}) {
+export async function dispatch(action, { db, env, payload, sessionToken, deviceToken, now } = {}) {
   const name = typeof action === 'string' ? action : '';
   const handler = HANDLERS.get(name);
   if (!handler) return actionNotFound(name);
@@ -81,6 +84,7 @@ export async function dispatch(action, { db, env, payload, sessionToken, now } =
     env: env && typeof env === 'object' ? env : {},
     payload: isPlainObject(payload) ? payload : {},
     sessionToken: typeof sessionToken === 'string' ? sessionToken : '',
+    deviceToken: typeof deviceToken === 'string' ? deviceToken : '',
     now,
   };
 
@@ -108,7 +112,7 @@ const SERVER_FAILURE_CODES = new Set([
 
 // ─── Internal ───────────────────────────────────────────────────────────────
 
-function letterSession(ctx) {
+function userSession(ctx) {
   return auth.requireSession(ctx.db, ctx.sessionToken, { now: ctx.now });
 }
 

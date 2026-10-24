@@ -177,7 +177,7 @@ test("startup anonymous401 tetap senyap, tanpa protected read dan tanpa pesan se
     ? failure("auth_required") : success({ gajiPNS: [], gajiPPPK: [] }) });
   env.document.getElementById("toast-title").innerText = "unchanged";
   await env.run("initializeApplication()");
-  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/session", "/api/bootstrap"]);
+  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/session"], "bootstrap butuh sesi, jadi tidak diambil anonim");
   assert.equal(env.run("currentUser"), null);
   assert.equal(env.document.getElementById("main-app").classList.contains("hidden"), true);
   assert.equal(env.document.getElementById("login-error-msg").classList.contains("hidden"), true);
@@ -185,6 +185,22 @@ test("startup anonymous401 tetap senyap, tanpa protected read dan tanpa pesan se
   assert.equal(env.document.getElementById("toast-title").innerText, "unchanged");
   assert.deepEqual(env.consoleCalls, []);
   assert.deepEqual(env.storageCalls, []);
+});
+
+test("master gaji dimuat setelah login berhasil karena bootstrap butuh sesi", async () => {
+  const env = await loadFrontend({ fetchImpl: async (url) => {
+    if (url === "/api/auth/login") return success({ user });
+    if (url === "/api/letters") return success([]);
+    if (url === "/api/bootstrap") return success({ gajiPNS: [{ pangkat: "Penata (III/c)", mkg: "10", nominal: "3000000" }], gajiPPPK: [] });
+    throw new Error(`unexpected ${url}`);
+  } });
+  env.document.getElementById("username").value = "admin";
+  env.document.getElementById("password").value = "rahasia";
+  await env.run("login({ preventDefault() {} })");
+  await flush();
+  assert.deepEqual(env.fetchCalls.map(({ url }) => url), ["/api/auth/login", "/api/letters", "/api/bootstrap"]);
+  assert.equal(env.run("masterGajiPNS.length"), 1);
+  assert.equal(env.run("masterGajiError"), "");
 });
 
 test("login/logout/getSession 401 tidak memicu expiry rekursif, UI logout mengosongkan cache", async () => {

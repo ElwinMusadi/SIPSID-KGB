@@ -114,10 +114,10 @@ Seluruh endpoint mengembalikan `{ ok, data, error, backendVersion }`. Mutasi waj
 
 | Method | Path | Action |
 |---|---|---|
-| `POST` | `/api/auth/login` | `auth.login` (set cookie sesi `HttpOnly; Secure; SameSite=Strict`) |
+| `POST` | `/api/auth/login` | `auth.login` (set cookie sesi `HttpOnly; Secure; SameSite=Strict` dan cookie perangkat) |
 | `POST` | `/api/auth/logout` | `auth.logout` |
 | `GET` | `/api/auth/session` | `auth.session` |
-| `GET` | `/api/bootstrap` | `bootstrap.get` (master gaji) |
+| `GET` | `/api/bootstrap` | `bootstrap.get` (master gaji; wajib sesi, anonim = HTTP 401) |
 | `GET` / `POST` | `/api/letters` | `letters.list` / `letters.create` |
 | `PUT` / `DELETE` | `/api/letters/:id` | `letters.update` / `letters.delete` |
 | `GET` / `POST` | `/api/users` | `users.list` / `users.create` (admin) |
@@ -135,6 +135,8 @@ Seluruh endpoint mengembalikan `{ ok, data, error, backendVersion }`. Mutasi waj
 - Admin terakhir dilindungi dari downgrade dan penghapusan (trigger D1, HTTP 422). Self-delete dan self-downgrade ditolak.
 - Username baru: 1–64 karakter `[A-Za-z0-9._-]`, diawali huruf/digit, unik tanpa membedakan huruf besar/kecil. Password baru minimal 8 karakter.
 - Login throttle server-side: 5 percobaan per 5 menit; username tidak terdaftar berbagi satu bucket, dan penolakan throttle memakai respons yang sama dengan kredensial salah.
+- Cookie perangkat `sipsid_device` (`HttpOnly; Secure; SameSite=Strict; Path=/api/auth/login`, 180 hari) diterbitkan ulang setiap login berhasil. Isinya token bertanda tangan HMAC (kunci diturunkan dari `PASSWORD_PEPPER`) untuk satu akun dan `session_version`-nya. Percobaan login dari browser dengan token sah memakai bucket throttle sendiri (juga 5 per 5 menit), sehingga orang lain yang sengaja salah password tidak dapat mengunci pengguna dari browser yang pernah dipakainya. Browser baru atau yang cookie-nya dihapus tetap memakai bucket akun. Token tidak memberi akses apa pun; reset password, perubahan role, dan penghapusan user membatalkannya.
+- `GET /api/bootstrap` wajib sesi agar request anonim berulang tidak menghabiskan kuota baca D1 (±1.056 baris per panggilan). Untuk perlindungan volume di tepi jaringan, pertimbangkan custom domain dengan aturan rate limiting Cloudflare pada `/api/*`.
 - Error D1 mentah tidak pernah dikirim ke klien; log tidak memuat payload, NIP, atau teks exception.
 
 ## Riwayat
