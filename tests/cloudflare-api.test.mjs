@@ -143,10 +143,10 @@ test("binding DB tidak ada → 500 server_misconfigured tanpa stack", async () =
 });
 
 test("GAS env lama tidak lagi dibutuhkan; handleRequest mengabaikan argumen fetch tambahan", async () => {
-  const { env } = await setupApi();
+  const { env, pengToken } = await setupApi();
   let fetchCalled = false;
   const response = await handleRequest(
-    { request: apiRequest("/api/bootstrap"), env },
+    { request: apiRequest("/api/bootstrap", { cookie: pengToken }), env },
     async () => { fetchCalled = true; throw new Error("no fetch"); },
   );
   assert.equal(response.status, 200);
@@ -229,13 +229,42 @@ test("body kosong pada route body diperlakukan sebagai {}", async () => {
 
 // ─── Login / logout / session ───────────────────────────────────────────────
 
+test("cookie perangkat dari login sebelumnya melewati bucket akun yang dihabiskan orang lain", async () => {
+  const { env } = await setupApi();
+  const body = { username: "admin1", password: PASSWORD };
+  const first = await callApi(env, "/api/auth/login", { method: "POST", body });
+  const deviceCookie = first.setCookies[1].split(";")[0];
+  assert.match(deviceCookie, /^sipsid_device=v1\./);
+
+  for (let i = 0; i < 5; i += 1) {
+    const wrong = await callApi(env, "/api/auth/login", { method: "POST", body: { username: "admin1", password: "salah" } });
+    assert.equal(wrong.status, 400);
+  }
+  const attacker = await callApi(env, "/api/auth/login", { method: "POST", body });
+  assert.equal(attacker.status, 400, "tanpa cookie perangkat, akun terkunci seperti sebelumnya");
+  assert.equal(attacker.setCookie, null);
+
+  const owner = await callApi(env, "/api/auth/login", { method: "POST", body, cookie: deviceCookie });
+  assert.equal(owner.status, 200);
+  assert.match(owner.setCookie, /^sipsid_session=/);
+  assert.match(owner.setCookies[1], /^sipsid_device=v1\./, "token perangkat diperbarui setiap login berhasil");
+
+  // Cookie perangkat hanya dibaca untuk login: endpoint lain tidak menganggapnya sesi.
+  const session = await callApi(env, "/api/auth/session", { cookie: deviceCookie });
+  assert.equal(session.status, 401);
+});
+
 test("login sets cookie and keeps token out of response", async () => {
   const { env, db } = await setupApi();
   const res = await callApi(env, "/api/auth/login", { method: "POST", body: { username: "admin1", password: PASSWORD } });
   assert.equal(res.status, 200);
   const match = /^sipsid_session=([A-Za-z0-9_-]{43}); HttpOnly; Secure; SameSite=Strict; Path=\/; Max-Age=28800$/.exec(res.setCookie);
   assert.ok(match, res.setCookie);
+  assert.equal(res.setCookies.length, 2);
+  const device = /^sipsid_device=(v1\.1\.1\.\d+\.[A-Za-z0-9_-]{43}); HttpOnly; Secure; SameSite=Strict; Path=\/api\/auth\/login; Max-Age=15552000$/.exec(res.setCookies[1]);
+  assert.ok(device, res.setCookies[1]);
   assert.equal(res.text.includes(match[1]), false, "token tidak boleh ada di body");
+  assert.equal(res.text.includes(device[1]), false, "token perangkat tidak boleh ada di body");
   assert.equal(res.text.includes(PASSWORD), false);
   assert.deepEqual(res.body, {
     ok: true,
@@ -476,8 +505,10 @@ test("error D1 sementara → 503 data_service_unavailable; lainnya → 502 data_
       ["D1 DB is overloaded. Too many requests queued.", 503, "data_service_unavailable"],
       ["D1_ERROR: no such table: salary_grades: SQLITE_ERROR", 502, "data_write_failed"],
     ];
+    // Token berbentuk sesi agar query sesi (query pertama bootstrap) benar-benar menyentuh D1 yang gagal.
+    const cookie = "A".repeat(43);
     for (const [message, status, code] of cases) {
-      const response = await handleRequest({ request: apiRequest("/api/bootstrap"), env: { DB: failingDb(message) } });
+      const response = await handleRequest({ request: apiRequest("/api/bootstrap", { cookie }), env: { DB: failingDb(message) } });
       const text = await response.text();
       assert.equal(response.status, status, message);
       assert.equal(JSON.parse(text).error.code, code);

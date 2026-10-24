@@ -12,6 +12,7 @@ import {
   PBKDF2_MAX_ITERATIONS,
   PASSWORD_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
+  DEVICE_TOKEN_MAX_AGE_SECONDS,
   AUTH_MESSAGES,
   sha256Hex,
   constantTimeEqual,
@@ -728,6 +729,140 @@ test('auth: user lookup error consumes the unknown bucket; INVALID_CREDENTIALS o
   );
   const ok = await login(db, DEFAULT_ENV, { username: 'lookup', password: 'LookupPass123!' }, t0 + 3000);
   assert.equal(ok.status, 'success');
+});
+
+// ─── Cookie perangkat: bucket throttle tersendiri untuk browser yang pernah login ──
+
+/** Menghabiskan bucket akun dari "browser penyerang" (tanpa token perangkat). */
+async function exhaustAccountBucket(db, username, now) {
+  for (let i = 0; i < THROTTLE_MAX_ATTEMPTS; i += 1) {
+    await assert.rejects(login(db, DEFAULT_ENV, { username, password: 'tebakan-salah' }, now), isInvalidCredentials);
+  }
+}
+const isInvalidCredentials = (err) => err.code === 'INVALID_CREDENTIALS' && err.message === AUTH_MESSAGES.INVALID_CREDENTIALS;
+
+test('auth: login berhasil mengembalikan token perangkat bertanda tangan', async () => {
+  const db = createTestDb();
+  const user = await seedUser(db, { username: 'perangkat', password: 'Perangkat123!' });
+  const t0 = 1700000000000;
+  const res = await login(db, DEFAULT_ENV, { username: 'perangkat', password: 'Perangkat123!' }, t0);
+  assert.match(res.deviceToken, new RegExp(`^v1\\.${user.id}\\.1\\.${t0 / 1000}\\.[A-Za-z0-9_-]{43}$`));
+  assert.equal(DEVICE_TOKEN_MAX_AGE_SECONDS, 180 * 24 * 60 * 60);
+});
+
+test('auth: perangkat tepercaya tetap bisa login walau orang lain menghabiskan bucket akun', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'kadis', password: 'KadisPassword1!' });
+  const t0 = 1700000000000;
+  const { deviceToken } = await login(db, DEFAULT_ENV, { username: 'kadis', password: 'KadisPassword1!' }, t0);
+
+  await exhaustAccountBucket(db, 'kadis', t0 + 1000);
+  // Tanpa token perangkat: password benar pun ditolak (perilaku lama tetap).
+  await assert.rejects(login(db, DEFAULT_ENV, { username: 'kadis', password: 'KadisPassword1!' }, t0 + 2000), isInvalidCredentials);
+  // Dengan token perangkat: bucket terpisah, login berhasil.
+  const ok = await login(db, DEFAULT_ENV, { username: 'KADIS', password: 'KadisPassword1!' }, t0 + 3000, { deviceToken });
+  assert.equal(ok.status, 'success');
+  // Login lewat perangkat tidak mengosongkan bucket akun: penyerang tetap terblokir.
+  await assert.rejects(login(db, DEFAULT_ENV, { username: 'kadis', password: 'KadisPassword1!' }, t0 + 4000), isInvalidCredentials);
+});
+
+test('auth: bucket perangkat tetap dibatasi 5 percobaan', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'lupa', password: 'LupaPassword1!' });
+  const t0 = 1700000000000;
+  const { deviceToken } = await login(db, DEFAULT_ENV, { username: 'lupa', password: 'LupaPassword1!' }, t0);
+  for (let i = 0; i < THROTTLE_MAX_ATTEMPTS; i += 1) {
+    await assert.rejects(login(db, DEFAULT_ENV, { username: 'lupa', password: 'salah' }, t0 + 1000, { deviceToken }), isInvalidCredentials);
+  }
+  await assert.rejects(login(db, DEFAULT_ENV, { username: 'lupa', password: 'LupaPassword1!' }, t0 + 2000, { deviceToken }), isInvalidCredentials);
+  const later = await login(db, DEFAULT_ENV, { username: 'lupa', password: 'LupaPassword1!' }, t0 + THROTTLE_WINDOW_MS + 2000, { deviceToken });
+  assert.equal(later.status, 'success');
+});
+
+test('auth: token perangkat palsu, milik akun lain, usang, kedaluwarsa, atau dari masa depan memakai bucket akun', async () => {
+  const db = createTestDb();
+  const victim = await seedUser(db, { username: 'korban', password: 'KorbanPassword1!' });
+  await seedUser(db, { username: 'lain', password: 'LainPassword1!' });
+  const t0 = 1700000000000;
+  const maxAgeMs = DEVICE_TOKEN_MAX_AGE_SECONDS * 1000;
+  const { deviceToken } = await login(db, DEFAULT_ENV, { username: 'korban', password: 'KorbanPassword1!' }, t0);
+  const { deviceToken: otherToken } = await login(db, DEFAULT_ENV, { username: 'lain', password: 'LainPassword1!' }, t0);
+  const { deviceToken: futureToken } = await login(db, DEFAULT_ENV, { username: 'korban', password: 'KorbanPassword1!' }, t0 + 60 * 60 * 1000);
+  const macStart = deviceToken.lastIndexOf('.') + 1;
+  const flip = (char) => (char === 'A' ? 'B' : 'A');
+  // Karakter terakhir base64url 32 byte hanya membawa 4 bit data; menaikkan 1 = ejaan non-kanonik dari MAC sama.
+  const lastIndex = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.indexOf(deviceToken.at(-1));
+  const nonCanonical = `${deviceToken.slice(0, -1)}${'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[lastIndex + 1]}`;
+  const forged = [
+    `${deviceToken.slice(0, macStart)}${flip(deviceToken[macStart])}${deviceToken.slice(macStart + 1)}`, // MAC diubah
+    nonCanonical,
+    deviceToken.replace(`v1.${victim.id}.`, `v1.${victim.id + 100}.`), // userId diubah tanpa MAC baru
+    otherToken, // sah, tetapi untuk akun lain
+    'v1.1.1.1700000000.' + 'A'.repeat(43),
+    'bukan-token',
+  ];
+  /** DB baru dengan bucket akun `korban` habis; korban = id 1 dan lain = id 2, sama dengan `db`. */
+  const lockedDb = async (env = DEFAULT_ENV) => {
+    const fresh = createTestDb();
+    await seedUser(fresh, { username: 'korban', hash: await hashPassword('KorbanPassword1!', env) });
+    await seedUser(fresh, { username: 'lain', hash: await hashPassword('LainPassword1!', env) });
+    for (let i = 0; i < THROTTLE_MAX_ATTEMPTS; i += 1) {
+      await assert.rejects(login(fresh, env, { username: 'korban', password: 'tebakan-salah' }, t0 + 1000), isInvalidCredentials);
+    }
+    return fresh;
+  };
+  const attempt = (target, token, now = t0 + 2000, env = DEFAULT_ENV) =>
+    login(target, env, { username: 'korban', password: 'KorbanPassword1!' }, now, { deviceToken: token });
+
+  for (const token of forged) {
+    const dbCase = await lockedDb();
+    await assert.rejects(attempt(dbCase, token), isInvalidCredentials, token);
+    // Kontrol positif: token asli diterima di keadaan yang sama.
+    assert.equal((await attempt(dbCase, deviceToken)).status, 'success');
+  }
+
+  // Pepper lain (mis. deployment preview) tidak dapat membuat token yang diterima di sini.
+  const otherPepper = { ...DEFAULT_ENV, PASSWORD_PEPPER: 'pepper-lain-untuk-preview-xxxxxx' };
+  const dbPepper = await lockedDb(otherPepper);
+  await assert.rejects(attempt(dbPepper, deviceToken, t0 + 2000, otherPepper), isInvalidCredentials);
+
+  // Kedaluwarsa: lewat 180 hari sejak diterbitkan.
+  const dbExpired = createTestDb();
+  await seedUser(dbExpired, { username: 'korban', password: 'KorbanPassword1!' });
+  await exhaustAccountBucket(dbExpired, 'korban', t0 + maxAgeMs + 1000);
+  await assert.rejects(attempt(dbExpired, deviceToken, t0 + maxAgeMs + 2000), isInvalidCredentials);
+
+  // Diterbitkan lebih dari 5 menit di masa depan relatif terhadap jam server.
+  const dbFuture = await lockedDb();
+  await assert.rejects(attempt(dbFuture, futureToken), isInvalidCredentials);
+
+  // Reset password menaikkan session_version → token lama tidak lagi tepercaya.
+  const dbReset = createTestDb();
+  await seedUser(dbReset, { username: 'korban', password: 'KorbanPassword1!' });
+  const { deviceToken: beforeReset } = await login(dbReset, DEFAULT_ENV, { username: 'korban', password: 'KorbanPassword1!' }, t0);
+  await run(dbReset, 'UPDATE users SET session_version = session_version + 1 WHERE username = ?1', 'korban');
+  await exhaustAccountBucket(dbReset, 'korban', t0 + 1000);
+  await assert.rejects(
+    login(dbReset, DEFAULT_ENV, { username: 'korban', password: 'KorbanPassword1!' }, t0 + 2000, { deviceToken: beforeReset }),
+    isInvalidCredentials,
+  );
+});
+
+test('auth: token perangkat diverifikasi sama untuk akun dikenal dan tidak dikenal (tanpa oracle waktu)', async () => {
+  const db = createTestDb();
+  await seedUser(db, { username: 'dikenal', password: 'Dikenal12345!' });
+  const t0 = 1700000000000;
+  const { deviceToken } = await login(db, DEFAULT_ENV, { username: 'dikenal', password: 'Dikenal12345!' }, t0);
+  const verifyKnown = await countSubtle('verify', () =>
+    assert.rejects(login(db, DEFAULT_ENV, { username: 'dikenal', password: 'salah' }, t0 + 1000, { deviceToken }), isInvalidCredentials));
+  const verifyUnknown = await countSubtle('verify', () =>
+    assert.rejects(login(db, DEFAULT_ENV, { username: 'hantu', password: 'salah' }, t0 + 1000, { deviceToken }), isInvalidCredentials));
+  assert.deepEqual({ verifyKnown, verifyUnknown }, { verifyKnown: 1, verifyUnknown: 1 });
+  const digestKnown = await countSubtle('digest', () =>
+    assert.rejects(login(db, DEFAULT_ENV, { username: 'dikenal', password: 'salah' }, t0 + 2000, { deviceToken }), isInvalidCredentials));
+  const digestUnknown = await countSubtle('digest', () =>
+    assert.rejects(login(db, DEFAULT_ENV, { username: 'hantu', password: 'salah' }, t0 + 2000, { deviceToken }), isInvalidCredentials));
+  assert.equal(digestUnknown, digestKnown);
 });
 
 test('auth: rehash compare-and-swap loses to a concurrent password reset (new hash untouched)', async () => {

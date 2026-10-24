@@ -11,6 +11,13 @@
 //   login gagal                 : 2 (SELECT user, UPSERT throttle)
 //   login berhasil              : 2 + 1 batch berisi 4 statement (5 bila rehash aktif)
 //   login saat lookup user gagal: 2 (SELECT gagal, UPSERT bucket unknown)
+//
+// Cookie perangkat (pola "device cookie" OWASP): setelah login berhasil, browser menerima token
+// bertanda tangan HMAC untuk akun itu. Percobaan berikutnya dari browser tersebut memakai bucket throttle
+// milik token, bukan bucket bersama akun, sehingga orang lain yang sengaja salah password tidak dapat
+// mengunci pengguna dari perangkat yang pernah dipakainya. Percobaan tanpa token valid tetap memakai
+// bucket akun dengan batas yang sama seperti sebelumnya (5 per 5 menit), sehingga laju tebakan penyerang
+// dan jumlah penulisan D1 tidak bertambah. Token tidak memberi akses apa pun selain bucket tersendiri.
 
 import { all, first, nowIso, run, statement } from './db.js';
 import { appError, fromD1Error } from './errors.js';
@@ -22,8 +29,13 @@ export const THROTTLE_WINDOW_MS = 5 * 60 * 1000;
 export const PBKDF2_MAX_ITERATIONS = 100000; // batas WebCrypto Workers (Bagian 5.5)
 export const PASSWORD_MIN_LENGTH = 8;
 export const PASSWORD_MAX_LENGTH = 200;
+export const DEVICE_TOKEN_MAX_AGE_SECONDS = 180 * 24 * 60 * 60;
 
 const UNKNOWN_USERNAME_BUCKET = '__unknown_username_bucket__';
+// `v1.<userId>.<sessionVersion>.<issuedAtDetik>.<hmac base64url>`; userId/sessionVersion ≥ 1, issuedAt ≤ 10 digit.
+const DEVICE_TOKEN_PATTERN = /^v1\.([1-9]\d{0,14})\.([1-9]\d{0,14})\.(\d{1,10})\.([A-Za-z0-9_-]{43})$/;
+const DEVICE_TOKEN_CLOCK_SKEW_SECONDS = 300;
+const DEVICE_KEY_LABEL = 'sipsid-device-cookie-v1:';
 const SESSION_TOKEN_BYTES = 32;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/; // base64url 32 byte tanpa padding
 const PBKDF2_SALT_BYTES = 16;
@@ -247,10 +259,11 @@ export async function revokeSession(db, token, now = new Date()) {
  * @param {object} env `PASSWORD_PEPPER`, `PASSWORD_HASH_ALGO`, `PBKDF2_ITERATIONS`, `PASSWORD_REHASH_ON_LOGIN`
  * @param {{ username?: unknown, password?: unknown }} credentials
  * @param {Date|number} [now]
- * @returns {Promise<{ status: 'success', sessionToken: string, expiresIn: number,
- *   user: { username: string, namaLengkap: string, hakAkses: string } }>}
+ * @param {{ deviceToken?: string }} [options] isi cookie perangkat dari request, bila ada
+ * @returns {Promise<{ status: 'success', sessionToken: string, expiresIn: number, deviceToken: string,
+ *   user: { username: string, namaLengkap: string, hakAkses: string } }>} `deviceToken` = token perangkat baru.
  */
-export async function login(db, env, credentials, now = new Date()) {
+export async function login(db, env, credentials, now = new Date(), { deviceToken = '' } = {}) {
   const username = cleanText(credentials?.username, 100);
   const password = String(credentials?.password || '');
   if (!username || !password) throw invalidCredentials();
@@ -277,8 +290,15 @@ export async function login(db, env, credentials, now = new Date()) {
     throw fromD1Error(lookupError);
   }
 
+  // Tanda tangan token perangkat diverifikasi apa pun hasil lookup, agar waktu respons tidak membedakan
+  // akun dikenal dan tidak dikenal. Token hanya berlaku untuk akun dan session_version yang sama.
+  const device = await parseDeviceToken(deviceToken, env, nowMs);
+  const trustedDevice = Boolean(user && device
+    && device.userId === Number(user.id) && device.sessionVersion === Number(user.session_version));
   // Key dari username kanonik tersimpan, tidak pernah dari input mentah (Bagian 4.1).
-  const key = await throttleKey(user ? String(user.username).toLowerCase() : UNKNOWN_USERNAME_BUCKET);
+  const key = await throttleKey(trustedDevice
+    ? `device:${deviceToken}`
+    : user ? String(user.username).toLowerCase() : UNKNOWN_USERNAME_BUCKET);
   const allowed = await consumeLoginAttempt(db, key, nowMs);
 
   // Derivasi password SELALU dijalankan tepat sekali (juga saat throttle menolak) agar waktu respons
@@ -322,6 +342,7 @@ export async function login(db, env, credentials, now = new Date()) {
     status: 'success',
     sessionToken: session.token,
     expiresIn: SESSION_TTL_SECONDS,
+    deviceToken: await createDeviceToken(user, env, nowMs),
     user: {
       username: storedUsername,
       namaLengkap: cleanText(user.nama_lengkap, 160) || storedUsername,
@@ -380,6 +401,41 @@ async function maybeRehash(password, storedHash, env) {
   } catch {
     return null;
   }
+}
+
+// Kunci HMAC diturunkan dari PASSWORD_PEPPER dengan label sendiri (tidak perlu secret baru).
+async function deviceKey(env) {
+  return crypto.subtle.importKey(
+    'raw',
+    encoder.encode(DEVICE_KEY_LABEL + env.PASSWORD_PEPPER),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+async function createDeviceToken(user, env, nowMs) {
+  const body = `v1.${Number(user.id)}.${Number(user.session_version)}.${Math.floor(nowMs / 1000)}`;
+  const mac = await crypto.subtle.sign('HMAC', await deviceKey(env), encoder.encode(body));
+  return `${body}.${bytesToBase64Url(new Uint8Array(mac))}`;
+}
+
+/** `{ userId, sessionVersion }` bila token perangkat bertanda tangan sah dan belum kedaluwarsa; selain itu null. */
+async function parseDeviceToken(token, env, nowMs) {
+  const match = typeof token === 'string' ? DEVICE_TOKEN_PATTERN.exec(token) : null;
+  if (!match) return null;
+  const issuedAt = Number(match[3]);
+  const nowSeconds = Math.floor(nowMs / 1000);
+  if (issuedAt > nowSeconds + DEVICE_TOKEN_CLOCK_SKEW_SECONDS || nowSeconds - issuedAt > DEVICE_TOKEN_MAX_AGE_SECONDS) {
+    return null;
+  }
+  const mac = base64ToBytes(`${match[4].replace(/-/g, '+').replace(/_/g, '/')}=`);
+  // Hanya encoding kanonik: 2 bit sisa karakter terakhir harus nol, agar satu token tidak punya beberapa
+  // ejaan (masing-masing akan mendapat bucket throttle sendiri).
+  if (!mac || bytesToBase64Url(mac) !== match[4]) return null;
+  const body = token.slice(0, token.lastIndexOf('.'));
+  if (!(await crypto.subtle.verify('HMAC', await deviceKey(env), mac, encoder.encode(body)))) return null;
+  return { userId: Number(match[1]), sessionVersion: Number(match[2]) };
 }
 
 /** Konsumsi atomik (Lampiran B). true = diizinkan. Error D1 = ditolak (fail-closed). */

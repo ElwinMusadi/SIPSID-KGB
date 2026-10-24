@@ -1831,9 +1831,9 @@
           }
       }
 
+      // Master gaji hanya dapat dibaca dengan sesi; pengguna anonim memuatnya setelah login.
       async function initializeApplication() {
-          await restoreSession();
-          await refreshMasterGaji();
+          if (await restoreSession()) await refreshMasterGaji();
       }
 
       function formatRupiahExact(nominal) {
@@ -1974,6 +1974,7 @@
               document.getElementById('password').value = '';
               arsipSuratLoaded = false;
               navigate('dashboard');
+              refreshMasterGaji();
               showToast('Login Berhasil', `Anda masuk sebagai ${currentUser.namaLengkap}`, true);
           } catch (error) {
               if (errorMsg) {
