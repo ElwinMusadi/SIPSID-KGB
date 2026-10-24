@@ -90,14 +90,14 @@ test("download PDF menyembunyikan marker raster dan menambah text layer native",
   assert.match(html, /createPdfFromCanvas\(canvas, ukuranKertas\)/);
 });
 
-test("laporan rekapitulasi diunduh sebagai PDF menggunakan generator bersama", async () => {
+test("laporan rekapitulasi diunduh sebagai PDF per halaman pratinjau", async () => {
   const html = await readFile(resolve(root, "Index.html"), "utf8");
   assert.doesNotMatch(html, /onclick="window\.print\(\)"/);
   assert.match(html, /id="btn-download-report-pdf"/);
   assert.match(html, /onclick="downloadReportPdf\(\)"/);
   assert.match(html, /async function downloadReportPdf\(\)/);
-  assert.match(html, /renderElementToCanvas\(sheet\)/);
-  assert.match(html, /createPdfFromCanvas\(canvas, 'legal'\)/);
+  assert.match(html, /sheet\.querySelectorAll\('\.report-page'\)/);
+  assert.match(html, /renderElementToCanvas\(page, \{/);
+  assert.match(html, /pdf\.addPage\('legal', 'portrait'\)/);
   assert.match(html, /buildReportPdfFileName\(activeReportContext\)/);
-
 });
