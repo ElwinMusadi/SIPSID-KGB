@@ -461,6 +461,70 @@ test("PDF download mempertahankan html2canvas/jsPDF serta marker text layer untu
   }
 });
 
+test("laporan rekapitulasi dipecah per halaman tanpa memotong baris dan header tabel diulang", async () => {
+  const env = await loadFrontend();
+  const paginate = env.run("paginateReportRows");
+  assert.deepEqual(plain(paginate([40, 40, 40, 40, 40], 100, 130)), [[0, 1], [2, 3, 4]]);
+  assert.deepEqual(plain(paginate([60, 60, 60], 100, 100)), [[0], [1], [2]]);
+  assert.deepEqual(plain(paginate([500, 10], 100, 100)), [[0], [1]], "baris lebih tinggi dari halaman tetap ditempatkan tanpa halaman kosong");
+  assert.deepEqual(plain(paginate([], 100, 100)), [[]]);
+
+  const page = env.run("buildReportPageHtml")("<div>KOP</div>", "<tr><td>1</td></tr>", "Halaman 1 dari 2");
+  assert.match(page, /class="report-page kertas-cetak kertas-legal/);
+  assert.match(page, /table-layout: fixed/);
+  assert.equal((page.match(/<col /g) || []).length, 8);
+  assert.match(page, /<thead>[\s\S]*Nama & NIP Pegawai[\s\S]*<\/thead>/);
+  assert.match(page, /Halaman 1 dari 2/);
+  const row = env.run("buildReportRowHtml")({ ...letter, nama: "<b>x</b>" }, 4);
+  assert.match(row, />5<\/td>/);
+  assert.match(row, /&lt;b&gt;x&lt;\/b&gt;/);
+
+  const html = await readHtml();
+  assert.match(html, /\.report-page\s*\{\s*height: 355\.6mm;\s*overflow: hidden;/);
+  assert.doesNotMatch(html.match(/id="report-print-scroll"[^>]*>/)[0], /justify-center/);
+});
+
+test("PDF laporan merender setiap halaman pratinjau menjadi satu halaman Legal", async () => {
+  const env = await loadFrontend();
+  const makePage = (name) => ({ name, classList: { contains: (cls) => cls === "report-page" }, querySelectorAll: () => [] });
+  const pages = [makePage("p1"), makePage("p2"), makePage("p3")];
+  env.document.getElementById("printable-report-sheet").querySelectorAll = (selector) => selector === ".report-page" ? pages : [];
+  const rendered = [];
+  env.ctx.html2canvas = async (element, options) => {
+    rendered.push(element.name);
+    assert.equal(options.ignoreElements(element), false, "halaman target tidak diabaikan");
+    assert.equal(pages.filter((other) => other !== element).every((other) => options.ignoreElements(other)), true, "halaman lain tidak ikut diklon");
+    assert.equal(options.ignoreElements({ classList: { contains: () => false } }), false);
+    return { width: 1632, height: 2688, toDataURL: () => `data:image/jpeg;base64,${element.name}` };
+  };
+  const calls = [];
+  env.ctx.window.jspdf = { jsPDF: class {
+    constructor(options) { calls.push(["construct", plain(options)]); this.internal = { pageSize: { getWidth: () => 215.9, getHeight: () => 355.6 } }; }
+    addPage(...args) { calls.push(["page", ...args]); }
+    addImage(...args) { calls.push(["image", args[0], ...args.slice(2, 6)]); }
+    save(name) { calls.push(["save", name]); }
+  } };
+  env.run(`activeReportContext = ${JSON.stringify({ titleKab: "Kabupaten Alor", month: "2026-10", generatedDate: "2026-10-24", total: 30 })}`);
+  await env.run("downloadReportPdf()");
+  assert.deepEqual(rendered, ["p1", "p2", "p3"]);
+  assert.deepEqual(plain(calls), [
+    ["construct", { orientation: "portrait", unit: "mm", format: "legal", compress: true }],
+    ["image", "data:image/jpeg;base64,p1", 0, 0, 215.9, 355.6],
+    ["page", "legal", "portrait"],
+    ["image", "data:image/jpeg;base64,p2", 0, 0, 215.9, 355.6],
+    ["page", "legal", "portrait"],
+    ["image", "data:image/jpeg;base64,p3", 0, 0, 215.9, 355.6],
+    ["save", "Laporan-Rekapitulasi-KGB-Kabupaten-Alor-2026-10-2026-10-24.pdf"],
+  ]);
+  assert.equal(env.document.getElementById("toast-title").innerText, "PDF Berhasil Diunduh");
+  assert.equal(env.document.getElementById("btn-download-report-pdf").disabled, false);
+
+  env.run("activeReportContext = null");
+  await env.run("downloadReportPdf()");
+  assert.equal(rendered.length, 3, "tanpa pratinjau yang selesai disusun, PDF tidak dibuat");
+  assert.equal(env.document.getElementById("toast-title").innerText, "PDF Gagal Dibuat");
+});
+
 test("kabkot tetap opsional dan layout responsif tidak diganti", async () => {
   const html = await readHtml();
   const kabkot = html.match(/<label[^>]*>\s*Kabupaten \/ Kota<\/label\s*>[\s\S]*?id="pegawai-kabkot"[\s\S]*?<\/select>[\s\S]*?<\/div>/)?.[0];
